@@ -54,6 +54,12 @@ from ..jit.fused_moe import (
     gen_cutlass_fused_moe_sm89_module,
     gen_trtllm_gen_fused_moe_sm100_module,
 )
+from ..moe_trace import (
+    enum_metadata as _moe_trace_enum_metadata,
+    next_call_id as _moe_trace_next_call_id,
+    tensor_metadata as _moe_trace_tensor_metadata,
+    trace_event as _moe_trace_event,
+)
 from ..utils import (
     check_shape_dtype_device,
     device_support_pdl,
@@ -2048,6 +2054,64 @@ def get_trtllm_moe_sm100_module():
             weight_layout=weight_layout,
             do_finalize=do_finalize,
             enable_pdl=enable_pdl,
+        )
+        tactic_payload = (
+            -1
+            if tactic == -1
+            else list(tactic)
+            if hasattr(tactic, "__iter__")
+            else tactic
+        )
+        _moe_trace_event(
+            "flashinfer.trtllm_moe.python_selected",
+            {
+                "moe_call_id": _moe_trace_next_call_id(),
+                "custom_op": "flashinfer::trtllm_fp8_block_scale_moe",
+                "routing_mode": (
+                    "routing_logits"
+                    if routing_logits is not None
+                    else "precomputed_topk"
+                ),
+                "tactic": tactic_payload,
+                "hidden_states": _moe_trace_tensor_metadata(hidden_states),
+                "hidden_states_scale": _moe_trace_tensor_metadata(hidden_states_scale),
+                "routing_logits": _moe_trace_tensor_metadata(routing_logits),
+                "topk_ids": _moe_trace_tensor_metadata(topk_ids),
+                "expert_weights": _moe_trace_tensor_metadata(expert_weights),
+                "output": _moe_trace_tensor_metadata(output),
+                "gemm1_weights": _moe_trace_tensor_metadata(gemm1_weights),
+                "gemm1_weights_scale": _moe_trace_tensor_metadata(gemm1_weights_scale),
+                "gemm2_weights": _moe_trace_tensor_metadata(gemm2_weights),
+                "gemm2_weights_scale": _moe_trace_tensor_metadata(gemm2_weights_scale),
+                "num_tokens": int(num_tokens),
+                "hidden_size": int(hidden_size),
+                "intermediate_size": intermediate_size,
+                "num_experts": num_experts,
+                "local_expert_offset": local_expert_offset,
+                "local_num_experts": local_num_experts,
+                "top_k": top_k,
+                "n_group": n_group,
+                "topk_group": topk_group,
+                "routed_scaling_factor": routed_scaling_factor,
+                "routing_method_type": routing_method_type,
+                "use_shuffled_weight": use_shuffled_weight,
+                "weight_layout": weight_layout,
+                "do_finalize": do_finalize,
+                "enable_pdl": enable_pdl,
+                "fp8_quantization_type": _moe_trace_enum_metadata(
+                    fp8_quantization_type
+                ),
+                "activation_type": _moe_trace_enum_metadata(activation_type),
+                "tune_max_num_tokens": tune_max_num_tokens,
+            },
+            dedupe_key=(
+                "flashinfer::trtllm_fp8_block_scale_moe",
+                tuple(hidden_states.shape),
+                intermediate_size,
+                top_k,
+                local_num_experts,
+                tuple(tactic_payload) if isinstance(tactic_payload, list) else tactic_payload,
+            ),
         )
         # Call the C++ function for block scale MoE
         intermediate_output = moe_op.trtllm_fp8_block_scale_moe(

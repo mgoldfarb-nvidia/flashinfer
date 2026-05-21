@@ -22,6 +22,12 @@ import torch
 from flashinfer.tllm_utils import delay_kernel
 
 from .jit.core import logger
+from .moe_trace import (
+    profile_events_enabled as _moe_trace_profile_events_enabled,
+    tensor_shapes as _moe_trace_tensor_shapes,
+    trace_event as _moe_trace_event,
+    verbose_enabled as _moe_trace_verbose_enabled,
+)
 from .version import __version__ as _flashinfer_version
 
 # This version should be updated whenever the nvfp4_cutlass backend is changed,
@@ -935,6 +941,27 @@ class AutoTuner:
                 )
                 # 1. In-memory cache (from live tuning)
                 if cache_key in self.profiling_cache:
+                    runner_id, tactic, stored_profile = self.profiling_cache[cache_key]
+                    _moe_trace_event(
+                        "flashinfer.autotune.cache_lookup",
+                        {
+                            "lookup_result": "cache_hit",
+                            "cache_source": "memory",
+                            "custom_op": custom_op,
+                            "runner_class": r.__class__.__name__,
+                            "runner_hash": hash(r),
+                            "runner_id": runner_id,
+                            "tactic": _tactic_to_json(tactic),
+                            "input_shapes": [list(s) for s in input_shapes],
+                            "cache_key": cache_key,
+                            "stored_profile": (
+                                stored_profile.get_opt_shapes()
+                                if stored_profile is not None
+                                else None
+                            ),
+                        },
+                        dedupe_key=("memory", custom_op, input_shapes, _tactic_to_json(tactic)),
+                    )
                     return True, *self.profiling_cache[cache_key]
 
                 # Build the hash-free file key used by both user configs and bundled configs
@@ -960,6 +987,21 @@ class AutoTuner:
                             f"[Autotuner]: Config cache hit for {custom_op} "
                             f"(runner={runner_name}, source=config file)"
                         )
+                    _moe_trace_event(
+                        "flashinfer.autotune.cache_lookup",
+                        {
+                            "lookup_result": "cache_hit",
+                            "cache_source": "config_file",
+                            "custom_op": custom_op,
+                            "runner_class": runner_name,
+                            "runner_id": runner_id,
+                            "tactic": _tactic_to_json(tactic),
+                            "input_shapes": [list(s) for s in input_shapes],
+                            "cache_key": cache_key,
+                            "file_key": file_key,
+                        },
+                        dedupe_key=("config_file", custom_op, input_shapes, _tactic_to_json(tactic)),
+                    )
                     return True, runner_id, tactic, None
 
                 # 3. Bundled package configs (legacy .py files)
@@ -969,9 +1011,41 @@ class AutoTuner:
                 ):
                     output = load_from_file(cache_key)
                     if output[0]:  # is_cache_hit
+                        _moe_trace_event(
+                            "flashinfer.autotune.cache_lookup",
+                            {
+                                "lookup_result": "cache_hit",
+                                "cache_source": "bundled_file",
+                                "custom_op": custom_op,
+                                "runner_class": r.__class__.__name__,
+                                "runner_id": output[1],
+                                "tactic": _tactic_to_json(output[2]),
+                                "input_shapes": [list(s) for s in input_shapes],
+                                "cache_key": cache_key,
+                            },
+                            dedupe_key=(
+                                "bundled_file",
+                                custom_op,
+                                input_shapes,
+                                _tactic_to_json(output[2]),
+                            ),
+                        )
                         return output
 
             # 4. Fallback
+            _moe_trace_event(
+                "flashinfer.autotune.cache_lookup",
+                {
+                    "lookup_result": "fallback",
+                    "cache_source": "none",
+                    "custom_op": custom_op,
+                    "runner_class": runners[0].__class__.__name__ if runners else None,
+                    "runner_id": 0,
+                    "tactic": -1,
+                    "input_shapes": [list(s) for s in input_shapes],
+                },
+                dedupe_key=("fallback", custom_op, input_shapes),
+            )
             return False, 0, -1, None
 
     def _apply_tuning_overrides(self, tuning_config: TuningConfig) -> TuningConfig:
@@ -1090,6 +1164,25 @@ class AutoTuner:
                     custom_op, runners, input_shapes, tuning_config, inputs=inputs
                 )
                 runner = runners[runner_id]
+                _moe_trace_event(
+                    "flashinfer.autotune.selected",
+                    {
+                        "phase": "runtime",
+                        "custom_op": custom_op,
+                        "cache_hit": is_cache_hit,
+                        "runner_id": runner_id,
+                        "runner_class": runner.__class__.__name__,
+                        "runner_hash": hash(runner),
+                        "tactic": _tactic_to_json(tactic),
+                        "input_shapes": [list(s) for s in input_shapes],
+                        "stored_profile": (
+                            stored_profile.get_opt_shapes()
+                            if stored_profile is not None
+                            else None
+                        ),
+                    },
+                    dedupe_key=(custom_op, input_shapes, _tactic_to_json(tactic), is_cache_hit),
+                )
                 # TODO: check the stored runner and tactic can implement this shape here
                 # Should not directly try (runner, tactic) here, or it will hurt a lot of inference perf.
 
@@ -1223,6 +1316,30 @@ class AutoTuner:
                         for r_id, r in enumerate(runners):
                             # TODO: use FakeTensor here.
                             valid_tactics = r.get_valid_tactics(tensors, p)
+                            valid_tactics_payload = (
+                                [_tactic_to_json(t) for t in valid_tactics]
+                                if _moe_trace_verbose_enabled()
+                                else None
+                            )
+                            _moe_trace_event(
+                                "flashinfer.autotune.candidates",
+                                {
+                                    "custom_op": custom_op,
+                                    "runner_id": r_id,
+                                    "runner_class": r.__class__.__name__,
+                                    "runner_hash": hash(r),
+                                    "profile_shapes": p.get_opt_shapes(),
+                                    "input_shapes": _moe_trace_tensor_shapes(tensors),
+                                    "valid_tactic_count": len(valid_tactics),
+                                    "valid_tactics": valid_tactics_payload,
+                                },
+                                dedupe_key=(
+                                    custom_op,
+                                    r_id,
+                                    p.get_opt_shapes(),
+                                    len(valid_tactics),
+                                ),
+                            )
                             runner_arg_names = runner_arg_names_map[r]
                             if (
                                 "do_preparation" in runner_arg_names
@@ -1308,6 +1425,27 @@ class AutoTuner:
                             )
                             logger.debug(
                                 f"[Autotuner]: profiling chosen runner: {runners[runner_id]} {tactic} for {cache_key}"
+                            )
+                            _moe_trace_event(
+                                "flashinfer.autotune.chosen",
+                                {
+                                    "custom_op": custom_op,
+                                    "runner_id": runner_id,
+                                    "runner_class": runners[
+                                        runner_id
+                                    ].__class__.__name__,
+                                    "runner_hash": hash(runners[runner_id]),
+                                    "tactic": _tactic_to_json(tactic),
+                                    "avg_time_ms": min_time,
+                                    "profile_shapes": p.get_opt_shapes(),
+                                    "input_shapes": _moe_trace_tensor_shapes(tensors),
+                                    "cache_key": cache_key,
+                                },
+                                dedupe_key=(
+                                    custom_op,
+                                    p.get_opt_shapes(),
+                                    _tactic_to_json(tactic),
+                                ),
                             )
 
                 except torch.cuda.OutOfMemoryError:
@@ -1432,6 +1570,19 @@ class AutoTuner:
         logger.debug(
             f"[Autotuner]: profiling {runner} {tactic}, shapes={shapes}, avg_time {avg_time}"
         )
+        if _moe_trace_profile_events_enabled():
+            _moe_trace_event(
+                "flashinfer.autotune.profile",
+                {
+                    "runner_class": runner.__class__.__name__,
+                    "runner_hash": hash(runner),
+                    "tactic": _tactic_to_json(tactic),
+                    "input_shapes": [list(s) for s in shapes],
+                    "avg_time_ms": avg_time,
+                    "warmup": self.warmup,
+                    "repeat": self.repeat,
+                },
+            )
 
         return avg_time
 

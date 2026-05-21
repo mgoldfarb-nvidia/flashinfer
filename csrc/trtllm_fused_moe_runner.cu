@@ -15,7 +15,9 @@
  */
 
 #include <iostream>
+#include <sstream>
 
+#include "trtllm_moe_trace.h"
 #include "flashinfer/exception.h"
 #include "flashinfer/trtllm/batched_gemm/KernelRunner.h"
 #include "flashinfer/trtllm/batched_gemm/trtllmGen_bmm_export/trtllm/gen/DtypeDecl.h"
@@ -770,6 +772,42 @@ void Runner::run(MoERunnerArgs const& args, MoEWorkspace const& workspace, int d
   void* hidden_states_scale_linear{args.hidden_states_scale};
 
   auto const& config = mPassingConfigs[configIndex];
+  {
+    std::ostringstream body;
+    body << "\"event\":\"flashinfer.trtllm_moe.kernel_config\""
+         << ",\"config_index\":" << configIndex
+         << ",\"gemm1_config_index\":" << config.gemm1Config
+         << ",\"gemm2_config_index\":" << config.gemm2Config
+         << ",\"enable_pdl\":" << (enable_pdl ? "true" : "false")
+         << ",\"device\":" << device
+         << ",\"num_tokens\":" << args.num_tokens
+         << ",\"hidden_size\":" << args.hidden_size
+         << ",\"hidden_size_output\":"
+         << (args.hidden_size_output.has_value() ? args.hidden_size_output.value()
+                                                 : args.hidden_size)
+         << ",\"intermediate_size\":" << args.intermediate_size
+         << ",\"num_experts\":" << args.num_experts
+         << ",\"local_expert_offset\":" << args.local_expert_offset
+         << ",\"local_num_experts\":" << args.local_num_experts
+         << ",\"top_k\":" << args.top_k
+         << ",\"n_group\":" << args.n_group
+         << ",\"topk_group\":" << args.topk_group
+         << ",\"routed_scaling_factor\":" << args.routed_scaling_factor
+         << ",\"do_finalize\":" << (args.do_finalize ? "true" : "false")
+         << ",\"use_deepseek_fp8\":" << (args.mUseDeepSeekFp8 ? "true" : "false")
+         << ",\"use_routing_scales_on_input\":"
+         << (args.mUseRoutingScalesOnInput ? "true" : "false")
+         << ",\"dtype_elt\":" << static_cast<int64_t>(args.mDtypeElt)
+         << ",\"dtype_out\":" << static_cast<int64_t>(args.mDtypeOut)
+         << ",\"dtype_expert_weights\":" << static_cast<int64_t>(args.mDtypeExpW)
+         << ",\"activation_type\":" << static_cast<int64_t>(args.activation_type);
+
+    std::ostringstream key;
+    key << "kernel_config:" << configIndex << ":" << config.gemm1Config << ":"
+        << config.gemm2Config << ":" << args.num_tokens << ":" << args.hidden_size << ":"
+        << args.intermediate_size << ":" << args.top_k << ":" << args.local_num_experts;
+    flashinfer::trtllm_moe_trace::append_body(body.str(), key.str());
+  }
 
   int32_t* permutedIdxToBiasRowIdx = args.gemm1_bias_type == batchedGemm::gemm::BiasType::Mn
                                          ? workspace.permuted_idx_to_expanded_idx

@@ -21,9 +21,11 @@
 #include <iomanip>
 #include <iostream>
 #include <set>
+#include <sstream>
 #include <unordered_map>
 #include <vector>
 
+#include "trtllm_moe_trace.h"
 #include "flashinfer/trtllm/batched_gemm/trtllmGen_bmm_export/GemmGatedActOptions.h"
 #include "flashinfer/trtllm/batched_gemm/trtllmGen_bmm_export/trtllm/gen/DtypeDecl.h"
 #include "flashinfer/trtllm/fused_moe/DevKernel.h"
@@ -83,6 +85,43 @@ inline std::string fp8QuantizationTypeToString(Fp8QuantizationType quantization_
     case Fp8QuantizationType::PerTensorFp8:
       return "PerTensorFp8";
   }
+}
+
+inline std::string tacticArrayToJson(Array<int64_t> const& tactic) {
+  std::ostringstream out;
+  out << "[";
+  for (int64_t i = 0; i < tactic.size(); ++i) {
+    if (i > 0) out << ",";
+    out << static_cast<int64_t>(tactic[i]);
+  }
+  out << "]";
+  return out.str();
+}
+
+inline void traceResolvedTileAndConfig(char const* op_name, Array<int64_t> const& requested,
+                                       std::vector<int32_t> const& supported_tile_nums,
+                                       int64_t num_tokens, int64_t top_k,
+                                       int64_t local_num_experts, int64_t tile_N,
+                                       int64_t config) {
+  float const avg_tokens_per_expert =
+      static_cast<float>(num_tokens * top_k) / std::max<int64_t>(local_num_experts, 1);
+  std::ostringstream body;
+  body << "\"event\":\"flashinfer.trtllm_moe.resolved_tile\""
+       << ",\"op\":" << trtllm_moe_trace::quote(op_name)
+       << ",\"requested_tactic\":" << tacticArrayToJson(requested)
+       << ",\"resolved_tile_N\":" << tile_N
+       << ",\"resolved_config_index\":" << config
+       << ",\"fallback_tile_used\":" << ((requested[0] == -1 || requested[1] == -1) ? "true" : "false")
+       << ",\"supported_tile_nums\":" << trtllm_moe_trace::json_array(supported_tile_nums)
+       << ",\"num_tokens\":" << num_tokens
+       << ",\"top_k\":" << top_k
+       << ",\"local_num_experts\":" << local_num_experts
+       << ",\"avg_tokens_per_expert\":" << avg_tokens_per_expert;
+
+  std::ostringstream key;
+  key << "resolved_tile:" << op_name << ":" << tacticArrayToJson(requested) << ":" << tile_N
+      << ":" << config << ":" << num_tokens << ":" << top_k << ":" << local_num_experts;
+  trtllm_moe_trace::append_body(body.str(), key.str());
 }
 
 inline ActivationType validateAndCastActivationType(int64_t act_type) {
@@ -502,6 +541,8 @@ class FusedMoeLauncher {
           args->gemm1_bias_type, usePerTokenScalingGemm1, usePerTokenScalingGemm2);
     }
 
+    int64_t const requested_moe_tactic = moe_tactic;
+    bool const fallback_config_used = moe_tactic == -1;
     if (moe_tactic == -1) {
       moe_tactic = moe_runner->getDefaultValidConfigIndex(
           args->top_k, args->hidden_size, args->intermediate_size, args->local_num_experts,
@@ -518,6 +559,39 @@ class FusedMoeLauncher {
     this->moe_tactic = moe_tactic;
 
     auto workspace_sizes = moe_runner->getWorkspaceSizeInBytes(*args, moe_tactic);
+    {
+      std::ostringstream body;
+      body << "\"event\":\"flashinfer.trtllm_moe.resolved_config\""
+           << ",\"requested_config_index\":" << requested_moe_tactic
+           << ",\"resolved_config_index\":" << moe_tactic
+           << ",\"fallback_config_used\":" << (fallback_config_used ? "true" : "false")
+           << ",\"tile_N\":" << tile_tokens_dim
+           << ",\"valid_config_count\":" << valid_cfgs.size()
+           << ",\"workspace_fc1_bytes\":" << std::get<0>(workspace_sizes)
+           << ",\"workspace_fc2_bytes\":" << std::get<1>(workspace_sizes)
+           << ",\"num_tokens\":" << args->num_tokens
+           << ",\"hidden_size\":" << args->hidden_size
+           << ",\"intermediate_size\":" << args->intermediate_size
+           << ",\"num_experts\":" << args->num_experts
+           << ",\"local_expert_offset\":" << args->local_expert_offset
+           << ",\"local_num_experts\":" << args->local_num_experts
+           << ",\"top_k\":" << args->top_k
+           << ",\"n_group\":" << args->n_group
+           << ",\"topk_group\":" << args->topk_group
+           << ",\"routing_method_type\":" << routing_method_type
+           << ",\"activation_type\":" << static_cast<int64_t>(activation_type)
+           << ",\"weight_layout\":" << static_cast<int64_t>(weight_layout)
+           << ",\"use_shuffled_weight\":" << (use_shuffled_weight ? "true" : "false")
+           << ",\"dtype_act\":" << static_cast<int64_t>(mDtypeAct)
+           << ",\"dtype_weights\":" << static_cast<int64_t>(mDtypeWeights)
+           << ",\"use_deepseek_fp8\":" << (args->mUseDeepSeekFp8 ? "true" : "false");
+
+      std::ostringstream key;
+      key << "resolved_config:" << tile_tokens_dim << ":" << args->num_tokens << ":"
+          << args->hidden_size << ":" << args->intermediate_size << ":" << args->top_k << ":"
+          << args->local_num_experts << ":" << moe_tactic;
+      trtllm_moe_trace::append_body(body.str(), key.str());
+    }
     workspace_fc1 = alloc_tensor({std::get<0>(workspace_sizes)}, dl_int8, hidden_states.device());
     workspace_fc2 = alloc_tensor({std::get<1>(workspace_sizes)}, dl_int8, hidden_states.device());
     workspace.bmm1_workspace = workspace_fc1.data_ptr();
@@ -585,6 +659,28 @@ class FusedMoeLauncher {
     prepare_moe(moe_tactic);
 
     cudaStream_t moe_stream = get_stream(hidden_states.device());
+    {
+      std::ostringstream body;
+      body << "\"event\":\"flashinfer.trtllm_moe.launch\""
+           << ",\"tile_N\":" << tile_tokens_dim
+           << ",\"config_index\":" << moe_tactic
+           << ",\"device\":" << hidden_states.device().device_id
+           << ",\"enable_pdl\":" << (enable_pdl ? "true" : "false")
+           << ",\"do_finalize\":" << (args->do_finalize ? "true" : "false")
+           << ",\"num_tokens\":" << args->num_tokens
+           << ",\"hidden_size\":" << args->hidden_size
+           << ",\"intermediate_size\":" << args->intermediate_size
+           << ",\"num_experts\":" << args->num_experts
+           << ",\"local_expert_offset\":" << args->local_expert_offset
+           << ",\"local_num_experts\":" << args->local_num_experts
+           << ",\"top_k\":" << args->top_k
+           << ",\"routing_method_type\":" << routing_method_type;
+      std::ostringstream key;
+      key << "launch:" << tile_tokens_dim << ":" << moe_tactic << ":" << args->num_tokens << ":"
+          << args->hidden_size << ":" << args->intermediate_size << ":" << args->top_k << ":"
+          << args->local_num_experts;
+      trtllm_moe_trace::append_body(body.str(), key.str());
+    }
     moe_runner->run(*args, workspace, hidden_states.device().device_id, moe_stream, moe_tactic,
                     enable_pdl);
 
@@ -1358,6 +1454,29 @@ class Fp8BlockScaleLauncher : public FusedMoeLauncher {
     prepare_moe(moe_tactic);
 
     cudaStream_t moe_stream = get_stream(hidden_states.device());
+    {
+      std::ostringstream body;
+      body << "\"event\":\"flashinfer.trtllm_moe.launch\""
+           << ",\"routing_mode\":\"fp8_precomputed_or_logits\""
+           << ",\"tile_N\":" << tile_tokens_dim
+           << ",\"config_index\":" << moe_tactic
+           << ",\"device\":" << hidden_states.device().device_id
+           << ",\"enable_pdl\":" << (enable_pdl ? "true" : "false")
+           << ",\"do_finalize\":" << (args->do_finalize ? "true" : "false")
+           << ",\"num_tokens\":" << args->num_tokens
+           << ",\"hidden_size\":" << args->hidden_size
+           << ",\"intermediate_size\":" << args->intermediate_size
+           << ",\"num_experts\":" << args->num_experts
+           << ",\"local_expert_offset\":" << args->local_expert_offset
+           << ",\"local_num_experts\":" << args->local_num_experts
+           << ",\"top_k\":" << args->top_k
+           << ",\"routing_method_type\":" << routing_method_type;
+      std::ostringstream key;
+      key << "launch:fp8:" << tile_tokens_dim << ":" << moe_tactic << ":" << args->num_tokens
+          << ":" << args->hidden_size << ":" << args->intermediate_size << ":" << args->top_k
+          << ":" << args->local_num_experts;
+      trtllm_moe_trace::append_body(body.str(), key.str());
+    }
     moe_runner->run(*args, workspace, hidden_states.device().device_id, moe_stream, moe_tactic,
                     enable_pdl);
 
@@ -1928,6 +2047,29 @@ class FP4BlockScaleLauncher : public FusedMoeLauncher {
     prepare_moe(moe_tactic);
 
     cudaStream_t moe_stream = get_stream(hidden_states.device());
+    {
+      std::ostringstream body;
+      body << "\"event\":\"flashinfer.trtllm_moe.launch\""
+           << ",\"routing_mode\":\"fp4\""
+           << ",\"tile_N\":" << tile_tokens_dim
+           << ",\"config_index\":" << moe_tactic
+           << ",\"device\":" << hidden_states.device().device_id
+           << ",\"enable_pdl\":" << (enable_pdl ? "true" : "false")
+           << ",\"do_finalize\":" << (args->do_finalize ? "true" : "false")
+           << ",\"num_tokens\":" << args->num_tokens
+           << ",\"hidden_size\":" << args->hidden_size
+           << ",\"intermediate_size\":" << args->intermediate_size
+           << ",\"num_experts\":" << args->num_experts
+           << ",\"local_expert_offset\":" << args->local_expert_offset
+           << ",\"local_num_experts\":" << args->local_num_experts
+           << ",\"top_k\":" << args->top_k
+           << ",\"routing_method_type\":" << routing_method_type;
+      std::ostringstream key;
+      key << "launch:fp4:" << tile_tokens_dim << ":" << moe_tactic << ":" << args->num_tokens
+          << ":" << args->hidden_size << ":" << args->intermediate_size << ":" << args->top_k
+          << ":" << args->local_num_experts;
+      trtllm_moe_trace::append_body(body.str(), key.str());
+    }
     moe_runner->run(*args, workspace, hidden_states.device().device_id, moe_stream, moe_tactic,
                     enable_pdl);
 
@@ -2054,6 +2196,8 @@ Array<Tensor> trtllm_bf16_moe(Optional<TensorView> const& routing_logits,
 
   auto const [tile_N, config] =
       resolveMoeTileAndConfig(moe_tactic, mSupportedTileN, num_tokens, top_k, local_num_experts);
+  traceResolvedTileAndConfig("trtllm_bf16_moe", moe_tactic, mSupportedTileN, num_tokens,
+                             top_k, local_num_experts, tile_N, config);
 
   // Get the launcher for the selected tile_N
   auto launcher_it = launchers_map.find(static_cast<int32_t>(tile_N));
@@ -2144,6 +2288,8 @@ Array<Tensor> trtllm_fp8_per_tensor_scale_moe(
 
   auto const [tile_N, config] =
       resolveMoeTileAndConfig(config_index, mSupportedTileN, num_tokens, top_k, local_num_experts);
+  traceResolvedTileAndConfig("trtllm_fp8_per_tensor_scale_moe", config_index, mSupportedTileN,
+                             num_tokens, top_k, local_num_experts, tile_N, config);
 
   // Get the launcher for the selected tile_N
   auto launcher_it = launchers_map.find(static_cast<int32_t>(tile_N));
@@ -2282,6 +2428,8 @@ Array<Tensor> trtllm_fp8_block_scale_moe(
 
   auto const [tile_N, config] = resolveMoeTileAndConfig(config_index, supported_tile_nums,
                                                         num_tokens, top_k, local_num_experts);
+  traceResolvedTileAndConfig("trtllm_fp8_block_scale_moe", config_index, supported_tile_nums,
+                             num_tokens, top_k, local_num_experts, tile_N, config);
 
   // Get the launcher for the selected tile_N
   auto launcher_it = launchers_map.find(static_cast<int32_t>(tile_N));
@@ -2430,6 +2578,8 @@ Array<Tensor> trtllm_fp4_block_scale_moe(
 
   auto const [tile_N, config] =
       resolveMoeTileAndConfig(config_index, mSupportedTileN, num_tokens, top_k, local_num_experts);
+  traceResolvedTileAndConfig("trtllm_fp4_block_scale_moe", config_index, mSupportedTileN,
+                             num_tokens, top_k, local_num_experts, tile_N, config);
 
   // Get the launcher for the selected tile_N
   auto launcher_it = launchers_map.find(static_cast<int32_t>(tile_N));
@@ -2531,6 +2681,8 @@ Array<Tensor> trtllm_mxint4_block_scale_moe(
 
   auto const [tile_N, config] =
       resolveMoeTileAndConfig(config_index, mSupportedTileN, num_tokens, top_k, local_num_experts);
+  traceResolvedTileAndConfig("trtllm_mxint4_block_scale_moe", config_index, mSupportedTileN,
+                             num_tokens, top_k, local_num_experts, tile_N, config);
 
   // Get the launcher for the selected tile_N
   auto launcher_it = launchers_map.find(static_cast<int32_t>(tile_N));
