@@ -3,6 +3,7 @@ Custom build backend that downloads cubins before building the package.
 """
 
 import os
+import shutil
 import sys
 from pathlib import Path
 from setuptools import build_meta as _orig
@@ -16,26 +17,77 @@ from build_utils import get_git_version
 os.environ["FLASHINFER_DISABLE_VERSION_CHECK"] = "1"
 
 
+def _copy_tree_contents(source: Path, destination: Path):
+    """Populate destination from source, using hardlinks when possible."""
+    if not source.exists():
+        return
+
+    for path in source.rglob("*"):
+        rel_path = path.relative_to(source)
+        if any(
+            part.endswith(".lock") or part.endswith(".tmp")
+            for part in rel_path.parts
+        ):
+            continue
+
+        target = destination / rel_path
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            try:
+                if os.path.samefile(path, target):
+                    continue
+            except OSError:
+                pass
+            target.unlink()
+
+        try:
+            os.link(path, target)
+        except OSError:
+            shutil.copy2(path, target)
+
+
 def _download_cubins():
     """Download cubins to the source directory before building."""
-    from flashinfer.artifacts import download_artifacts
-
     # Create cubins directory in the source tree
     cubin_dir = Path(__file__).parent / "flashinfer_cubin" / "cubins"
     cubin_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir_value = os.environ.get("FLASHINFER_CUBIN_CACHE_DIR")
+    cache_dir = Path(cache_dir_value) if cache_dir_value else None
 
     # Set environment variable to download to our package directory
     original_cubin_dir = os.environ.get("FLASHINFER_CUBIN_DIR")
     os.environ["FLASHINFER_CUBIN_DIR"] = str(cubin_dir)
 
     try:
+        if cache_dir is not None:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Restoring cached cubins from {cache_dir} to {cubin_dir}...")
+            _copy_tree_contents(cache_dir, cubin_dir)
+
+        from flashinfer import artifacts
+        from flashinfer.jit import cubin_loader
+        from flashinfer.jit import env as jit_env
+
+        # These modules cache FLASHINFER_CUBIN_DIR at import time.
+        jit_env.FLASHINFER_CUBIN_DIR = cubin_dir
+        cubin_loader.FLASHINFER_CUBIN_DIR = cubin_dir
+        artifacts.FLASHINFER_CUBIN_DIR = cubin_dir
+
         print(f"Downloading cubins to {cubin_dir}...")
-        download_artifacts()
+        artifacts.download_artifacts()
         print(f"Successfully downloaded cubins to {cubin_dir}")
 
         # Count the downloaded files
         cubin_files = list(cubin_dir.rglob("*.cubin"))
         print(f"Downloaded {len(cubin_files)} cubin files")
+
+        if cache_dir is not None:
+            print(f"Updating cubin cache at {cache_dir}...")
+            _copy_tree_contents(cubin_dir, cache_dir)
 
     finally:
         # Restore original environment variable

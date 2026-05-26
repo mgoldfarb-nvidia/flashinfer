@@ -202,7 +202,16 @@ def get_checksums(subdirs):
             FLASHINFER_CUBINS_REPOSITORY, safe_urljoin(subdir, "checksums.txt")
         )
         checksum_path = FLASHINFER_CUBIN_DIR / safe_urljoin(subdir, "checksums.txt")
-        download_file(uri, checksum_path)
+        checksum_name = safe_urljoin(subdir, "checksums.txt")
+        expected_sha256 = CheckSumHash.map_checksums.get(checksum_name)
+        if (
+            expected_sha256
+            and checksum_path.is_file()
+            and verify_cubin(str(checksum_path), expected_sha256)
+        ):
+            logger.info(f"Reusing cached artifact: {checksum_path}")
+        else:
+            download_file(uri, checksum_path)
         with open(checksum_path, "r") as f:
             for line in f:
                 sha256, filename = line.strip().split()
@@ -281,6 +290,7 @@ def download_artifacts() -> None:
     # HTTPS connections.
     session = requests.Session()
     cubin_files = list[tuple[str, str]](get_subdir_file_list())
+    artifact_checksums = dict(cubin_files)
     num_threads = int(os.environ.get("FLASHINFER_CUBIN_DOWNLOAD_THREADS", "4"))
     with tqdm_logging_redirect(
         total=len(cubin_files), desc="Downloading cubins"
@@ -291,18 +301,27 @@ def download_artifacts() -> None:
 
         with ThreadPoolExecutor(num_threads) as pool:
             futures = []
+            results = []
             for name, _ in cubin_files:
                 source = safe_urljoin(FLASHINFER_CUBINS_REPOSITORY, name)
                 local_path = FLASHINFER_CUBIN_DIR / name
                 # Ensure parent directory exists
                 local_path.parent.mkdir(parents=True, exist_ok=True)
+                expected_sha256 = artifact_checksums[name]
+                if local_path.is_file() and verify_cubin(
+                    str(local_path), expected_sha256
+                ):
+                    logger.info(f"Reusing cached artifact: {local_path}")
+                    results.append(True)
+                    pbar.update(1)
+                    continue
                 fut = pool.submit(
                     download_file, source, str(local_path), session=session
                 )
                 fut.add_done_callback(update_pbar_cb)
                 futures.append(fut)
 
-            results = [fut.result() for fut in as_completed(futures)]
+            results.extend(fut.result() for fut in as_completed(futures))
 
     all_success = all(results)
     if not all_success:
