@@ -72,6 +72,10 @@ inline std::string trace_path() {
 
 inline std::string trace_mode() { return env_or("FLASHINFER_TRTLLM_MOE_TRACE_MODE", "shape_once"); }
 
+inline std::string trace_stage() {
+  return env_or("FLASHINFER_TRTLLM_MOE_TRACE_STAGE", "unknown");
+}
+
 inline bool dedupe_enabled() {
   return trace_mode() == "shape_once";
 }
@@ -147,12 +151,14 @@ inline void append_body(std::string const& body, std::string const& dedupe_key =
   static std::unordered_set<std::string> seen;
   static int64_t event_count = 0;
   std::lock_guard<std::mutex> guard(mutex);
+  std::string const stage = trace_stage();
 
   if (dedupe_enabled() && !dedupe_key.empty()) {
-    if (seen.find(dedupe_key) != seen.end()) {
+    std::string const staged_dedupe_key = stage + ":" + dedupe_key;
+    if (seen.find(staged_dedupe_key) != seen.end()) {
       return;
     }
-    seen.insert(dedupe_key);
+    seen.insert(staged_dedupe_key);
   }
 
   int64_t const limit = first_n_limit();
@@ -173,6 +179,7 @@ inline void append_body(std::string const& body, std::string const& dedupe_key =
       << ",\"hostname\":" << quote(hostname())
       << ",\"rank\":" << quote(rank())
       << ",\"local_rank\":" << quote(local_rank())
+      << ",\"trace_stage\":" << quote(stage)
       << "," << body << "}\n";
 }
 

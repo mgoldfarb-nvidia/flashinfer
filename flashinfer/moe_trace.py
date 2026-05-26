@@ -4,6 +4,8 @@ import os
 import socket
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,7 @@ _TRACE_ENV = "FLASHINFER_TRTLLM_MOE_TRACE"
 _TRACE_FILE_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_FILE"
 _TRACE_MODE_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_MODE"
 _TRACE_FIRST_N_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_FIRST_N"
+_TRACE_STAGE_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_STAGE"
 
 _DEFAULT_TRACE_FILE = "/tmp/flashinfer_trtllm_moe_trace.rank%r.local%l.pid%p.jsonl"
 
@@ -20,6 +23,7 @@ _LOCK = threading.Lock()
 _SEEN_KEYS: set[str] = set()
 _EVENT_COUNTS: dict[str, int] = {}
 _CALL_COUNTER = itertools.count()
+_STAGE_LOCAL = threading.local()
 
 
 def _truthy(value: str | None) -> bool:
@@ -36,6 +40,35 @@ def profile_events_enabled() -> bool:
 
 def verbose_enabled() -> bool:
     return _truthy(os.getenv("FLASHINFER_TRTLLM_MOE_TRACE_VERBOSE"))
+
+
+def current_stage() -> str:
+    stack = getattr(_STAGE_LOCAL, "stack", None)
+    if stack:
+        return stack[-1]
+    return os.getenv(_TRACE_STAGE_ENV, "unknown")
+
+
+@contextmanager
+def trace_stage(stage: str) -> Iterator[None]:
+    stack = getattr(_STAGE_LOCAL, "stack", None)
+    if stack is None:
+        stack = []
+        _STAGE_LOCAL.stack = stack
+
+    previous_env = os.environ.get(_TRACE_STAGE_ENV)
+    stack.append(stage)
+    os.environ[_TRACE_STAGE_ENV] = stage
+    try:
+        yield
+    finally:
+        stack.pop()
+        if stack:
+            os.environ[_TRACE_STAGE_ENV] = stack[-1]
+        elif previous_env is None:
+            os.environ.pop(_TRACE_STAGE_ENV, None)
+        else:
+            os.environ[_TRACE_STAGE_ENV] = previous_env
 
 
 def _rank() -> str:
@@ -86,8 +119,10 @@ def trace_event(
     if not enabled():
         return
 
+    stage = current_stage()
+
     if _dedupe_enabled() and dedupe_key is not None:
-        key = json.dumps([event, dedupe_key], sort_keys=True, default=_json_default)
+        key = json.dumps([stage, event, dedupe_key], sort_keys=True, default=_json_default)
         with _LOCK:
             if key in _SEEN_KEYS:
                 return
@@ -110,6 +145,7 @@ def trace_event(
         "hostname": socket.gethostname(),
         "rank": _rank(),
         "local_rank": _local_rank(),
+        "trace_stage": stage,
     }
     record.update(payload)
 
@@ -138,8 +174,19 @@ def tensor_metadata(tensor: torch.Tensor | None) -> dict[str, Any] | None:
     }
 
 
-def tensor_shapes(tensors: list[torch.Tensor]) -> list[list[int]]:
-    return [list(t.shape) for t in tensors]
+def tensor_shapes(tensors: list[Any]) -> list[Any]:
+    shapes: list[Any] = []
+    for tensor in tensors:
+        if isinstance(tensor, torch.Tensor):
+            shapes.append(list(tensor.shape))
+        else:
+            shapes.append(
+                {
+                    "type": type(tensor).__name__,
+                    "value": str(tensor),
+                }
+            )
+    return shapes
 
 
 def enum_metadata(value: Any) -> Any:

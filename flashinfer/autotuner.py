@@ -25,6 +25,7 @@ from .jit.core import logger
 from .moe_trace import (
     profile_events_enabled as _moe_trace_profile_events_enabled,
     tensor_shapes as _moe_trace_tensor_shapes,
+    trace_stage as _moe_trace_stage,
     trace_event as _moe_trace_event,
     verbose_enabled as _moe_trace_verbose_enabled,
 )
@@ -631,8 +632,15 @@ def autotune(
             override_stack.pop()
         raise
 
+    stage_context = (
+        _moe_trace_stage("flashinfer_autotune")
+        if tune_mode
+        else contextlib.nullcontext()
+    )
+
     try:
-        yield
+        with stage_context:
+            yield
     finally:
         with tuner._lock:
             if tune_mode:
