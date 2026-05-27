@@ -1,195 +1,25 @@
-import itertools
-import json
-import os
-import socket
-import threading
-import time
-from collections.abc import Iterator
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Any
+from .trace.runtime import (
+    current_stage,
+    enabled,
+    enum_metadata,
+    next_call_id,
+    profile_events_enabled,
+    tensor_metadata,
+    tensor_shapes,
+    trace_event,
+    trace_stage,
+    verbose_enabled,
+)
 
-import torch
-
-_TRACE_ENV = "FLASHINFER_TRTLLM_MOE_TRACE"
-_TRACE_FILE_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_FILE"
-_TRACE_MODE_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_MODE"
-_TRACE_FIRST_N_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_FIRST_N"
-_TRACE_STAGE_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_STAGE"
-
-_DEFAULT_TRACE_FILE = "/tmp/flashinfer_trtllm_moe_trace.rank%r.local%l.pid%p.jsonl"
-
-_LOCK = threading.Lock()
-_SEEN_KEYS: set[str] = set()
-_EVENT_COUNTS: dict[str, int] = {}
-_CALL_COUNTER = itertools.count()
-_STAGE_LOCAL = threading.local()
-
-
-def _truthy(value: str | None) -> bool:
-    return value is not None and value.lower() in {"1", "true", "yes", "on"}
-
-
-def enabled() -> bool:
-    return _truthy(os.getenv(_TRACE_ENV))
-
-
-def profile_events_enabled() -> bool:
-    return _truthy(os.getenv("FLASHINFER_TRTLLM_MOE_TRACE_PROFILES"))
-
-
-def verbose_enabled() -> bool:
-    return _truthy(os.getenv("FLASHINFER_TRTLLM_MOE_TRACE_VERBOSE"))
-
-
-def current_stage() -> str:
-    stack = getattr(_STAGE_LOCAL, "stack", None)
-    if stack:
-        return stack[-1]
-    return os.getenv(_TRACE_STAGE_ENV, "unknown")
-
-
-@contextmanager
-def trace_stage(stage: str) -> Iterator[None]:
-    stack = getattr(_STAGE_LOCAL, "stack", None)
-    if stack is None:
-        stack = []
-        _STAGE_LOCAL.stack = stack
-
-    previous_env = os.environ.get(_TRACE_STAGE_ENV)
-    stack.append(stage)
-    os.environ[_TRACE_STAGE_ENV] = stage
-    try:
-        yield
-    finally:
-        stack.pop()
-        if stack:
-            os.environ[_TRACE_STAGE_ENV] = stack[-1]
-        elif previous_env is None:
-            os.environ.pop(_TRACE_STAGE_ENV, None)
-        else:
-            os.environ[_TRACE_STAGE_ENV] = previous_env
-
-
-def _rank() -> str:
-    return os.getenv("RANK", os.getenv("SLURM_PROCID", "0"))
-
-
-def _local_rank() -> str:
-    return os.getenv("LOCAL_RANK", os.getenv("SLURM_LOCALID", "0"))
-
-
-def _trace_path() -> Path:
-    path = os.getenv(_TRACE_FILE_ENV, _DEFAULT_TRACE_FILE)
-    substitutions = {
-        "%p": str(os.getpid()),
-        "%r": _rank(),
-        "%l": _local_rank(),
-        "%h": socket.gethostname(),
-    }
-    for key, value in substitutions.items():
-        path = path.replace(key, value)
-    return Path(path)
-
-
-def _json_default(value: Any) -> str:
-    return str(value)
-
-
-def _dedupe_enabled() -> bool:
-    return os.getenv(_TRACE_MODE_ENV, "shape_once").lower() == "shape_once"
-
-
-def _first_n_limit() -> int | None:
-    mode = os.getenv(_TRACE_MODE_ENV, "shape_once").lower()
-    if mode != "first_n":
-        return None
-    try:
-        return max(0, int(os.getenv(_TRACE_FIRST_N_ENV, "10")))
-    except ValueError:
-        return 10
-
-
-def trace_event(
-    event: str,
-    payload: dict[str, Any],
-    *,
-    dedupe_key: Any | None = None,
-) -> None:
-    if not enabled():
-        return
-
-    stage = current_stage()
-
-    if _dedupe_enabled() and dedupe_key is not None:
-        key = json.dumps([stage, event, dedupe_key], sort_keys=True, default=_json_default)
-        with _LOCK:
-            if key in _SEEN_KEYS:
-                return
-            _SEEN_KEYS.add(key)
-
-    first_n = _first_n_limit()
-    if first_n is not None:
-        with _LOCK:
-            count = _EVENT_COUNTS.get(event, 0)
-            if count >= first_n:
-                return
-            _EVENT_COUNTS[event] = count + 1
-
-    record = {
-        "schema_version": 1,
-        "source": "flashinfer_python",
-        "event": event,
-        "ts_ns": time.time_ns(),
-        "pid": os.getpid(),
-        "hostname": socket.gethostname(),
-        "rank": _rank(),
-        "local_rank": _local_rank(),
-        "trace_stage": stage,
-    }
-    record.update(payload)
-
-    path = _trace_path()
-    with _LOCK:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as out:
-            out.write(json.dumps(record, sort_keys=True, default=_json_default))
-            out.write("\n")
-
-
-def next_call_id() -> str:
-    return f"{_rank()}:{os.getpid()}:{next(_CALL_COUNTER)}"
-
-
-def tensor_metadata(tensor: torch.Tensor | None) -> dict[str, Any] | None:
-    if tensor is None:
-        return None
-    return {
-        "shape": list(tensor.shape),
-        "dtype": str(tensor.dtype),
-        "device": str(tensor.device),
-        "stride": list(tensor.stride()),
-        "numel": int(tensor.numel()),
-        "is_contiguous": bool(tensor.is_contiguous()),
-    }
-
-
-def tensor_shapes(tensors: list[Any]) -> list[Any]:
-    shapes: list[Any] = []
-    for tensor in tensors:
-        if isinstance(tensor, torch.Tensor):
-            shapes.append(list(tensor.shape))
-        else:
-            shapes.append(
-                {
-                    "type": type(tensor).__name__,
-                    "value": str(tensor),
-                }
-            )
-    return shapes
-
-
-def enum_metadata(value: Any) -> Any:
-    if hasattr(value, "name") and hasattr(value, "value"):
-        return {"name": value.name, "value": value.value}
-    return value
+__all__ = [
+    "current_stage",
+    "enabled",
+    "enum_metadata",
+    "next_call_id",
+    "profile_events_enabled",
+    "tensor_metadata",
+    "tensor_shapes",
+    "trace_event",
+    "trace_stage",
+    "verbose_enabled",
+]

@@ -107,6 +107,10 @@ inline void traceResolvedTileAndConfig(char const* op_name, Array<int64_t> const
       static_cast<float>(num_tokens * top_k) / std::max<int64_t>(local_num_experts, 1);
   std::ostringstream body;
   body << "\"event\":\"flashinfer.trtllm_moe.resolved_tile\""
+       << ",\"event_kind\":\"resolved_tile\""
+       << ",\"op_family\":\"moe\""
+       << ",\"op_name\":" << trtllm_moe_trace::quote(op_name)
+       << ",\"backend\":\"trtllm\""
        << ",\"op\":" << trtllm_moe_trace::quote(op_name)
        << ",\"requested_tactic\":" << tacticArrayToJson(requested)
        << ",\"resolved_tile_N\":" << tile_N
@@ -562,6 +566,10 @@ class FusedMoeLauncher {
     {
       std::ostringstream body;
       body << "\"event\":\"flashinfer.trtllm_moe.resolved_config\""
+           << ",\"event_kind\":\"resolved_config\""
+           << ",\"op_family\":\"moe\""
+           << ",\"op_name\":\"trtllm_moe\""
+           << ",\"backend\":\"trtllm\""
            << ",\"requested_config_index\":" << requested_moe_tactic
            << ",\"resolved_config_index\":" << moe_tactic
            << ",\"fallback_config_used\":" << (fallback_config_used ? "true" : "false")
@@ -662,6 +670,10 @@ class FusedMoeLauncher {
     {
       std::ostringstream body;
       body << "\"event\":\"flashinfer.trtllm_moe.launch\""
+           << ",\"event_kind\":\"launch\""
+           << ",\"op_family\":\"moe\""
+           << ",\"op_name\":\"trtllm_moe\""
+           << ",\"backend\":\"trtllm\""
            << ",\"tile_N\":" << tile_tokens_dim
            << ",\"config_index\":" << moe_tactic
            << ",\"device\":" << hidden_states.device().device_id
@@ -1457,6 +1469,10 @@ class Fp8BlockScaleLauncher : public FusedMoeLauncher {
     {
       std::ostringstream body;
       body << "\"event\":\"flashinfer.trtllm_moe.launch\""
+           << ",\"event_kind\":\"launch\""
+           << ",\"op_family\":\"moe\""
+           << ",\"op_name\":\"trtllm_fp8_block_scale_moe\""
+           << ",\"backend\":\"trtllm\""
            << ",\"routing_mode\":\"fp8_precomputed_or_logits\""
            << ",\"tile_N\":" << tile_tokens_dim
            << ",\"config_index\":" << moe_tactic
@@ -2050,6 +2066,10 @@ class FP4BlockScaleLauncher : public FusedMoeLauncher {
     {
       std::ostringstream body;
       body << "\"event\":\"flashinfer.trtllm_moe.launch\""
+           << ",\"event_kind\":\"launch\""
+           << ",\"op_family\":\"moe\""
+           << ",\"op_name\":\"trtllm_fp4_block_scale_moe\""
+           << ",\"backend\":\"trtllm\""
            << ",\"routing_mode\":\"fp4\""
            << ",\"tile_N\":" << tile_tokens_dim
            << ",\"config_index\":" << moe_tactic

@@ -2066,6 +2066,10 @@ def get_trtllm_moe_sm100_module():
             "flashinfer.trtllm_moe.python_selected",
             {
                 "moe_call_id": _moe_trace_next_call_id(),
+                "event_kind": "python_selected",
+                "op_family": "moe",
+                "op_name": "trtllm_fp8_block_scale_moe",
+                "backend": "trtllm",
                 "custom_op": "flashinfer::trtllm_fp8_block_scale_moe",
                 "routing_mode": (
                     "routing_logits"

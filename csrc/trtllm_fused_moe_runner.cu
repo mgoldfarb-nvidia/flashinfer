@@ -34,6 +34,99 @@ namespace trtllmgen_moe {
 
 namespace btg = batchedGemm::trtllm::gen;
 
+namespace {
+
+inline void traceMoeRoutingLaunch(int32_t tileTokensDim, int32_t numTokens, int32_t numExperts,
+                                  int32_t topK, int32_t nGroup, int32_t topkGroup,
+                                  int32_t localExpertOffset, int32_t localNumExperts,
+                                  float routedScalingFactor, btg::Dtype dtypeElt,
+                                  btg::Dtype dtypeBias, btg::Dtype dtypeLogits,
+                                  Routing::RoutingMethodType routingMethodType,
+                                  bool useRoutingScalesOnInput, bool useDeepSeekFp8,
+                                  bool normTopkProb, bool hasRoutingReplay) {
+  std::ostringstream body;
+  body << "\"event\":\"flashinfer.trtllm_moe.subkernel_launch\""
+       << ",\"event_kind\":\"subkernel_launch\""
+       << ",\"op_family\":\"moe\""
+       << ",\"op_name\":\"trtllm_moe\""
+       << ",\"backend\":\"trtllm\""
+       << ",\"subkernel_kind\":\"routing\""
+       << ",\"config_index\":-1"
+       << ",\"subkernel_config_index\":" << tileTokensDim
+       << ",\"tile_N\":" << tileTokensDim
+       << ",\"num_tokens\":" << numTokens
+       << ",\"num_experts\":" << numExperts
+       << ",\"top_k\":" << topK
+       << ",\"n_group\":" << nGroup
+       << ",\"topk_group\":" << topkGroup
+       << ",\"local_expert_offset\":" << localExpertOffset
+       << ",\"local_num_experts\":" << localNumExperts
+       << ",\"routed_scaling_factor\":" << routedScalingFactor
+       << ",\"routing_method_type\":" << static_cast<int64_t>(routingMethodType)
+       << ",\"dtype_elt\":" << static_cast<int64_t>(dtypeElt)
+       << ",\"dtype_bias\":" << static_cast<int64_t>(dtypeBias)
+       << ",\"dtype_logits\":" << static_cast<int64_t>(dtypeLogits)
+       << ",\"use_routing_scales_on_input\":"
+       << (useRoutingScalesOnInput ? "true" : "false")
+       << ",\"use_deepseek_fp8\":" << (useDeepSeekFp8 ? "true" : "false")
+       << ",\"norm_topk_prob\":" << (normTopkProb ? "true" : "false")
+       << ",\"has_routing_replay\":" << (hasRoutingReplay ? "true" : "false");
+
+  std::ostringstream key;
+  key << "subkernel_launch:routing:" << tileTokensDim << ":" << numTokens << ":"
+      << numExperts << ":" << topK << ":" << nGroup << ":" << topkGroup << ":"
+      << localExpertOffset << ":" << localNumExperts << ":"
+      << static_cast<int64_t>(routingMethodType);
+  flashinfer::trtllm_moe_trace::append_body(body.str(), key.str());
+}
+
+inline void traceMoeSubkernelLaunch(char const* subkernel_kind, MoE::MoERunnerArgs const& args,
+                                    int device, int64_t configIndex, int64_t subkernelConfigIndex,
+                                    bool enable_pdl, char const* detail = nullptr) {
+  std::ostringstream body;
+  body << "\"event\":\"flashinfer.trtllm_moe.subkernel_launch\""
+       << ",\"event_kind\":\"subkernel_launch\""
+       << ",\"op_family\":\"moe\""
+       << ",\"op_name\":\"trtllm_moe\""
+       << ",\"backend\":\"trtllm\""
+       << ",\"subkernel_kind\":" << flashinfer::trtllm_moe_trace::quote(subkernel_kind)
+       << ",\"config_index\":" << configIndex
+       << ",\"subkernel_config_index\":" << subkernelConfigIndex
+       << ",\"enable_pdl\":" << (enable_pdl ? "true" : "false")
+       << ",\"device\":" << device
+       << ",\"num_tokens\":" << args.num_tokens
+       << ",\"hidden_size\":" << args.hidden_size
+       << ",\"hidden_size_output\":"
+       << (args.hidden_size_output.has_value() ? args.hidden_size_output.value()
+                                               : args.hidden_size)
+       << ",\"intermediate_size\":" << args.intermediate_size
+       << ",\"num_experts\":" << args.num_experts
+       << ",\"local_expert_offset\":" << args.local_expert_offset
+       << ",\"local_num_experts\":" << args.local_num_experts
+       << ",\"top_k\":" << args.top_k
+       << ",\"n_group\":" << args.n_group
+       << ",\"topk_group\":" << args.topk_group
+       << ",\"do_finalize\":" << (args.do_finalize ? "true" : "false")
+       << ",\"use_deepseek_fp8\":" << (args.mUseDeepSeekFp8 ? "true" : "false")
+       << ",\"use_routing_scales_on_input\":"
+       << (args.mUseRoutingScalesOnInput ? "true" : "false")
+       << ",\"dtype_elt\":" << static_cast<int64_t>(args.mDtypeElt)
+       << ",\"dtype_out\":" << static_cast<int64_t>(args.mDtypeOut)
+       << ",\"dtype_expert_weights\":" << static_cast<int64_t>(args.mDtypeExpW)
+       << ",\"activation_type\":" << static_cast<int64_t>(args.activation_type);
+  if (detail != nullptr) {
+    body << ",\"detail\":" << flashinfer::trtllm_moe_trace::quote(detail);
+  }
+
+  std::ostringstream key;
+  key << "subkernel_launch:" << subkernel_kind << ":" << configIndex << ":"
+      << subkernelConfigIndex << ":" << args.num_tokens << ":" << args.hidden_size << ":"
+      << args.intermediate_size << ":" << args.top_k << ":" << args.local_num_experts;
+  flashinfer::trtllm_moe_trace::append_body(body.str(), key.str());
+}
+
+}  // namespace
+
 namespace Routing {
 namespace {
 inline int32_t computeLog2(int32_t val, std::string const& name = "") {
@@ -64,6 +157,10 @@ void Runner::run(void* routingLogits, void* routingBias, int32_t numTokens, int3
                  btg::Dtype dtypeBias, bool useRoutingScalesOnInput, bool useDeepSeekFp8,
                  RoutingMethodType routingMethodType, cudaStream_t stream, btg::Dtype dtypeLogits,
                  bool normTopkProb, int16_t* routing_replay_out) {
+  traceMoeRoutingLaunch(mTileTokensDim, numTokens, numExperts, topK, nGroup, topkGroup,
+                        localExpertOffset, localNumExperts, routedScalingFactor, dtypeElt,
+                        dtypeBias, dtypeLogits, routingMethodType, useRoutingScalesOnInput,
+                        useDeepSeekFp8, normTopkProb, routing_replay_out != nullptr);
   if (routingMethodType == RoutingMethodType::DeepSeekV3 && nGroup <= 1) {
     // DeepSeek no-groups case: use routingCustom with SigmoidBias preprocess
     // and ScaledSumNormalize postprocess. This is more efficient than the full DeepSeek
@@ -775,6 +872,10 @@ void Runner::run(MoERunnerArgs const& args, MoEWorkspace const& workspace, int d
   {
     std::ostringstream body;
     body << "\"event\":\"flashinfer.trtllm_moe.kernel_config\""
+         << ",\"event_kind\":\"kernel_config\""
+         << ",\"op_family\":\"moe\""
+         << ",\"op_name\":\"trtllm_moe\""
+         << ",\"backend\":\"trtllm\""
          << ",\"config_index\":" << configIndex
          << ",\"gemm1_config_index\":" << config.gemm1Config
          << ",\"gemm2_config_index\":" << config.gemm2Config
@@ -812,6 +913,7 @@ void Runner::run(MoERunnerArgs const& args, MoEWorkspace const& workspace, int d
   int32_t* permutedIdxToBiasRowIdx = args.gemm1_bias_type == batchedGemm::gemm::BiasType::Mn
                                          ? workspace.permuted_idx_to_expanded_idx
                                          : nullptr;
+  traceMoeSubkernelLaunch("gemm1", args, device, configIndex, config.gemm1Config, enable_pdl);
   mPermuteGemm1.run(
       args.hidden_states, hidden_states_scale_linear, args.gemm1_weights, args.gemm1_weights_scale,
       workspace.token_scales, /* perChannelScales */ nullptr, args.output1_scales_scalar,
@@ -829,6 +931,8 @@ void Runner::run(MoERunnerArgs const& args, MoEWorkspace const& workspace, int d
   // We do activation only for DeepSeek FP8, as cubins do not have fused activation.
   if (args.mDtypeElt == btg::Dtype::E4m3 && args.mUseDeepSeekFp8) {
     // Run activation
+    traceMoeSubkernelLaunch("activation", args, device, configIndex, -1, enable_pdl,
+                            "deepseek_fp8");
     moe::dev::activation::run(activationData, stream);
     gemm2_input = workspace.activation_output;
     gemm2_input_scale = workspace.activation_output_scale;
@@ -851,6 +955,10 @@ void Runner::run(MoERunnerArgs const& args, MoEWorkspace const& workspace, int d
         tensorrt_llm::common::getEnvNVFP44Over6E4M3Use256()) {
       globalScaleInv = 1.f / (256.f * 6.f);
     }
+    traceMoeSubkernelLaunch("quantize", args, device, configIndex, -1, enable_pdl,
+                            sfLayout == QuantizationSFLayout::SWIZZLED_128x4
+                                ? "nvfp4_swizzled_128x4"
+                                : "nvfp4_swizzled_8x4");
     invokeNvfp4QuantAndPerTokenScale<__nv_bfloat16>(
         args.num_tokens * args.top_k, args.intermediate_size,
         reinterpret_cast<__nv_bfloat16 const*>(workspace.gemm1_output), globalScaleInv,
@@ -864,6 +972,7 @@ void Runner::run(MoERunnerArgs const& args, MoEWorkspace const& workspace, int d
   }
 
   // Run gemm2
+  traceMoeSubkernelLaunch("gemm2", args, device, configIndex, config.gemm2Config, enable_pdl);
   mGemm2.run(gemm2_input, gemm2_input_scale, args.gemm2_weights, args.gemm2_weights_scale,
              workspace.token_scales_fc2, /*perChannelScales*/ nullptr, args.output2_scales_scalar,
              args.gemm2_bias, workspace.gemm2_output, workspace.gemm2_output_scale, args.top_k,
@@ -875,6 +984,7 @@ void Runner::run(MoERunnerArgs const& args, MoEWorkspace const& workspace, int d
   // Run finalize
   if (args.do_finalize) {
     // Run finalize
+    traceMoeSubkernelLaunch("finalize", args, device, configIndex, -1, enable_pdl);
     moe::dev::finalize::run(finalizeData, stream);
     sync_check_cuda_error(stream);
   }
