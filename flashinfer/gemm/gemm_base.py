@@ -45,6 +45,7 @@ from ..autotuner import (
     TunableRunner,
     TuningConfig,
 )
+from ..moe_trace import trace_context, trace_event
 from ..fused_moe.utils import (
     get_hybrid_num_tokens_buckets,
     map_to_hybrid_bucket_uncapped,
@@ -4772,14 +4773,56 @@ def mm_mxfp8(
         workspace_buffer,
     ]
 
-    runner, tactic = tuner.choose_one(
-        custom_op="mxfp8_gemm",
-        runners=runners,
-        tuning_config=tuning_config,
-        inputs=inputs,
-    )
+    trace_fields = {
+        "gemm_kind": "mxfp8_mm",
+        "gemm_m": int(a.shape[0]),
+        "gemm_n": int(b.shape[1]),
+        "gemm_k": int(a.shape[1]),
+        "gemm_shape_mnk": [int(a.shape[0]), int(b.shape[1]), int(a.shape[1])],
+        "gemm_a_shape": list(a.shape),
+        "gemm_b_shape": list(b.shape),
+        "gemm_out_shape": list(out.shape),
+        "gemm_a_descale_shape": list(a_descale.shape),
+        "gemm_b_descale_shape": list(b_descale.shape),
+        "gemm_a_dtype": str(a.dtype),
+        "gemm_b_dtype": str(b.dtype),
+        "gemm_out_dtype": str(out.dtype),
+        "gemm_a_descale_dtype": str(a_descale.dtype),
+        "gemm_b_descale_dtype": str(b_descale.dtype),
+        "gemm_backend_request": backend,
+        "gemm_backend_candidates": list(backends),
+        "gemm_workspace_bytes": int(
+            workspace_buffer.numel() * workspace_buffer.element_size()
+        ),
+    }
+    with trace_context(trace_fields):
+        runner, tactic = tuner.choose_one(
+            custom_op="mxfp8_gemm",
+            runners=runners,
+            tuning_config=tuning_config,
+            inputs=inputs,
+        )
 
-    runner(inputs=inputs, tactic=tactic)
+        trace_event(
+            "flashinfer.mxfp8_gemm.launch",
+            {
+                "custom_op": "mxfp8_gemm",
+                "op_name": "mxfp8_gemm",
+                "op_family": "gemm",
+                "runner_class": runner.__class__.__name__,
+                "runner_hash": hash(runner),
+                "tactic": tactic,
+            },
+            dedupe_key=(
+                "mxfp8_gemm",
+                runner.__class__.__name__,
+                tactic,
+                tuple(a.shape),
+                tuple(b.shape),
+                tuple(out.shape),
+            ),
+        )
+        runner(inputs=inputs, tactic=tactic)
     return out
 
 

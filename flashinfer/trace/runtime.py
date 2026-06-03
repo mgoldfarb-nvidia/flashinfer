@@ -37,6 +37,7 @@ _SEEN_KEYS: set[str] = set()
 _EVENT_COUNTS: dict[str, int] = {}
 _CALL_COUNTER = itertools.count()
 _STAGE_LOCAL = threading.local()
+_CONTEXT_LOCAL = threading.local()
 
 
 def _truthy(value: str | None) -> bool:
@@ -103,6 +104,43 @@ def trace_stage(stage: str) -> Iterator[None]:
                     os.environ.pop(env_name, None)
                 else:
                     os.environ[env_name] = value
+
+
+def current_context() -> dict[str, Any]:
+    stack = getattr(_CONTEXT_LOCAL, "stack", None)
+    if not stack:
+        return {}
+    merged: dict[str, Any] = {}
+    for frame in stack:
+        merged.update(frame)
+    return merged
+
+
+@contextmanager
+def trace_context(
+    fields: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> Iterator[None]:
+    if not enabled():
+        yield
+        return
+
+    frame: dict[str, Any] = {}
+    if fields is not None:
+        frame.update(fields)
+    frame.update(kwargs)
+    frame = {key: value for key, value in frame.items() if value is not None}
+
+    stack = getattr(_CONTEXT_LOCAL, "stack", None)
+    if stack is None:
+        stack = []
+        _CONTEXT_LOCAL.stack = stack
+
+    stack.append(frame)
+    try:
+        yield
+    finally:
+        stack.pop()
 
 
 def _rank() -> str:
@@ -223,9 +261,14 @@ def trace_event(
         return
 
     stage = current_stage()
+    context = current_context()
 
     if _dedupe_enabled() and dedupe_key is not None:
-        key = json.dumps([stage, event, dedupe_key], sort_keys=True, default=_json_default)
+        key = json.dumps(
+            [stage, event, dedupe_key, context],
+            sort_keys=True,
+            default=_json_default,
+        )
         with _LOCK:
             if key in _SEEN_KEYS:
                 return
@@ -250,6 +293,9 @@ def trace_event(
         "local_rank": _local_rank(),
         "trace_stage": stage,
     }
+    if context:
+        record["trace_context"] = context
+        record.update(context)
     record.update(payload)
     _populate_common_fields(record, event)
 
