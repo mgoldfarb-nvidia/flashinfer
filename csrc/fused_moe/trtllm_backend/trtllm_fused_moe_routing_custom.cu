@@ -97,6 +97,9 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts <= 1024 ? KernelPa
           params.mPtrExpandedIdxToPermutedIdx[expandedIdx] = int32_t{-1};
         }
         auto expertIdx = params.mPtrTopKIds[expandedIdx];
+        if (params.mPtrRoutingReplayOut != nullptr) {
+          params.mPtrRoutingReplayOut[expandedIdx] = static_cast<int16_t>(expertIdx);
+        }
         if (expertIdx > -1 && expertIdx < params.mNumExperts) {
           int offset = warpIdx * MaxNumExperts + expertIdx;
           smemKIdx[offset] = static_cast<int8_t>(laneIdx);
@@ -115,11 +118,15 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts <= 1024 ? KernelPa
           params.mPtrScores + scoreOffset, params);
 
       if (laneIdx < params.mTopK) {
+        auto const expandedIdx = warpIdx * params.mTopK + laneIdx;
+        if (params.mPtrRoutingReplayOut != nullptr) {
+          params.mPtrRoutingReplayOut[expandedIdx] =
+              static_cast<int16_t>(warpTopKExpertIdx[laneIdx]);
+        }
         int offset = warpIdx * MaxNumExperts + warpTopKExpertIdx[laneIdx];
         smemKIdx[offset] = static_cast<int8_t>(laneIdx);
         if (params.mPtrTopKWeights != nullptr) {
-          params.mPtrTopKWeights[warpIdx * params.mTopK + laneIdx] =
-              OutputT{warpTopKScore[laneIdx]};
+          params.mPtrTopKWeights[expandedIdx] = OutputT{warpTopKScore[laneIdx]};
         }
       }
     }  // end if (validToken)
@@ -136,6 +143,9 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts <= 1024 ? KernelPa
         }
         auto const scoreIdx = params.mPtrTopKPacked[expandedIdx];
         int const expertIdx = static_cast<int>(scoreIdx.idx);
+        if (params.mPtrRoutingReplayOut != nullptr) {
+          params.mPtrRoutingReplayOut[expandedIdx] = static_cast<int16_t>(expertIdx);
+        }
         if (expertIdx >= 0 && expertIdx < params.mNumExperts) {
           int const offset = warpIdx * MaxNumExperts + expertIdx;
           smemKIdx[offset] = static_cast<int8_t>(laneIdx);
@@ -415,6 +425,9 @@ __global__ void routingIndicesDynBlockKernel(KernelParams params) {
           params.mPtrExpandedIdxToPermutedIdx[expandedIdx] = int32_t{-1};
         }
         auto expertIdx = params.mPtrTopKIds[expandedIdx];
+        if (params.mPtrRoutingReplayOut != nullptr) {
+          params.mPtrRoutingReplayOut[expandedIdx] = static_cast<int16_t>(expertIdx);
+        }
         if (expertIdx > -1 && expertIdx < params.mNumExperts) {
           smemKIdx[tokenIdx * MaxNumExperts + expertIdx] = static_cast<int8_t>(laneIdx);
         }
@@ -430,11 +443,15 @@ __global__ void routingIndicesDynBlockKernel(KernelParams params) {
           params.mPtrScores + scoreOff, params);
 
       if (laneIdx < params.mTopK) {
+        auto const expandedIdx = tokenIdx * params.mTopK + laneIdx;
+        if (params.mPtrRoutingReplayOut != nullptr) {
+          params.mPtrRoutingReplayOut[expandedIdx] =
+              static_cast<int16_t>(warpTopKExpertIdx[laneIdx]);
+        }
         smemKIdx[tokenIdx * MaxNumExperts + warpTopKExpertIdx[laneIdx]] =
             static_cast<int8_t>(laneIdx);
         if (params.mPtrTopKWeights != nullptr) {
-          params.mPtrTopKWeights[tokenIdx * params.mTopK + laneIdx] =
-              OutputT{warpTopKScore[laneIdx]};
+          params.mPtrTopKWeights[expandedIdx] = OutputT{warpTopKScore[laneIdx]};
         }
       }
     } else if (params.mPtrTopKPacked != nullptr) {
@@ -445,6 +462,9 @@ __global__ void routingIndicesDynBlockKernel(KernelParams params) {
         }
         auto scoreIdx = params.mPtrTopKPacked[expandedIdx];
         int const expertIdx = static_cast<int>(scoreIdx.idx);
+        if (params.mPtrRoutingReplayOut != nullptr) {
+          params.mPtrRoutingReplayOut[expandedIdx] = static_cast<int16_t>(expertIdx);
+        }
         if (expertIdx >= 0 && expertIdx < params.mNumExperts) {
           smemKIdx[tokenIdx * MaxNumExperts + expertIdx] = static_cast<int8_t>(laneIdx);
           if (params.mPtrTopKWeights != nullptr) {

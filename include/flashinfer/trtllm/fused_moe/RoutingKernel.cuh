@@ -269,6 +269,9 @@ __device__ void routingPermutation(KernelParams params,
     }
 
     expertIndexes[ii] = scoreIdx.idx;
+    if (params.mPtrRoutingReplayOut != nullptr) {
+      params.mPtrRoutingReplayOut[expandedIdx] = static_cast<int16_t>(scoreIdx.idx);
+    }
     // check whether this expert is local to our GPU at all and ignore if not
     auto localExpertIdx = scoreIdx.idx - params.mLocalExpertsStartIdx;
     auto isLocalExpert = localExpertIdx >= 0 && localExpertIdx < localExpertExtent &&
@@ -522,12 +525,14 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts <= 1024 ? KernelPa
     if (params.mPtrTopKIds != nullptr) {
       idx = params.mPtrTopKIds[expandedIdx];
     } else {
-      // If params.mPtrTopKIds != nullptr, we don't need to store the weights
+      scoreIdx = params.mPtrTopKPacked[expandedIdx];
+      idx = scoreIdx.idx;
       if (params.mPtrTopKWeights != nullptr) {
-        scoreIdx = params.mPtrTopKPacked[expandedIdx];
-        idx = scoreIdx.idx;
         params.mPtrTopKWeights[expandedIdx] = static_cast<OutputT>(scoreIdx.score);
       }
+    }
+    if (params.mPtrRoutingReplayOut != nullptr) {
+      params.mPtrRoutingReplayOut[expandedIdx] = static_cast<int16_t>(idx);
     }
     // check whether this expert is local to our GPU at all and ignore if not
     auto localExpertIdx = idx - params.mLocalExpertsStartIdx;
@@ -945,6 +950,9 @@ __global__ void __launch_bounds__(KernelParams::MaxNumExperts)
     int32_t expertIdx =
         getExpertIdxFromInputWithWeights(params, expandedIdx, params.mPtrTopKWeights);
     expertIndexes[ii] = expertIdx;
+    if (params.mPtrRoutingReplayOut != nullptr) {
+      params.mPtrRoutingReplayOut[expandedIdx] = static_cast<int16_t>(expertIdx);
+    }
     // check whether this expert is local to our GPU at all and ignore if not
     auto localExpertIdx = expertIdx - params.mLocalExpertsStartIdx;
     auto isLocalExpert = localExpertIdx >= 0 && localExpertIdx < localExpertExtent &&

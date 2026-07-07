@@ -838,7 +838,7 @@ def test_fp8_block_scale_moe_routing_replay(
 ):
     """Test that routing_replay_out in trtllm_fp8_block_scale_moe records correct expert IDs.
 
-    Uses DeepSeekV3 routing (the only routing method with replay support).
+    Uses DeepSeekV3 routing.
     Runs the full MoE kernel twice with the same inputs: once with routing_replay_out
     and once without. Verifies that:
     1. The MoE output is identical (replay has no side effects).
@@ -972,3 +972,132 @@ def test_fp8_block_scale_moe_routing_replay(
     assert (routing_replay_out[num_tokens:] == -1).all(), (
         "Kernel should not write beyond active token rows"
     )
+
+
+def test_mxfp8_block_scale_moe_routing_replay():
+    """MXFP8 DeepSeek routing should populate an oversized replay buffer."""
+    compute_capability = get_compute_capability(torch.device(device="cuda"))
+    if compute_capability[0] not in [10]:
+        pytest.skip("This test is only guaranteed to work on SM100 and SM103 GPUs.")
+
+    torch.manual_seed(42)
+    device = torch.device("cuda:0")
+    enable_pdl = device_support_pdl(device)
+    # Match Nemotron 3 Ultra's decode routing shape.
+    num_tokens = 16
+    hidden_size = 512
+    intermediate_size = 512
+    num_experts = 512
+    top_k = 22
+    # n_group=1 follows the routingCustom path used by Nemotron 3 Ultra.
+    n_group = 1
+    topk_group = 1
+
+    routing_logits = torch.randn(
+        (num_tokens, num_experts), device=device, dtype=torch.float32
+    )
+    routing_bias = torch.randn(num_experts, device=device, dtype=torch.bfloat16)
+    hidden_states = torch.randn(
+        (num_tokens, hidden_size), device=device, dtype=torch.bfloat16
+    )
+    gemm1_weights = torch.randn(
+        (num_experts, 2 * intermediate_size, hidden_size),
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    gemm2_weights = torch.randn(
+        (num_experts, hidden_size, intermediate_size),
+        device=device,
+        dtype=torch.bfloat16,
+    )
+
+    quant_impl = FP8BlockScaleMoe(fp8_quantization_type=QuantMode.FP8_BLOCK_SCALE_MXFP8)
+    quant_weights = quant_impl.quantize_weights(
+        gemm1_weights, gemm2_weights, hidden_states
+    )
+    quant_inputs = quant_impl.quantize_inputs(hidden_states)
+    epilogue_tile_m = 128
+    gemm1_weights_shuffled = []
+    gemm1_scales_shuffled = []
+    gemm2_weights_shuffled = []
+    gemm2_scales_shuffled = []
+    for expert_idx in range(num_experts):
+        w1_interleaved = quant_weights["gemm1_weights"][expert_idx].reshape(
+            2 * intermediate_size, -1
+        )
+        s1_interleaved = quant_weights["gemm1_scales"][expert_idx].reshape(
+            2 * intermediate_size, -1
+        )
+        w1_interleaved = reorder_rows_for_gated_act_gemm(w1_interleaved)
+        s1_interleaved = reorder_rows_for_gated_act_gemm(s1_interleaved)
+        gemm1_weights_shuffled.append(
+            shuffle_matrix_a(w1_interleaved.view(torch.uint8), epilogue_tile_m)
+            .contiguous()
+            .view(quant_weights["gemm1_weights"].dtype)
+        )
+        gemm1_scales_shuffled.append(
+            shuffle_matrix_sf_a(
+                s1_interleaved.view(torch.uint8).reshape(2 * intermediate_size, -1),
+                epilogue_tile_m,
+            )
+            .contiguous()
+            .view(quant_weights["gemm1_scales"].dtype)
+        )
+        gemm2_weights_shuffled.append(
+            shuffle_matrix_a(
+                quant_weights["gemm2_weights"][expert_idx].view(torch.uint8),
+                epilogue_tile_m,
+            )
+            .contiguous()
+            .view(quant_weights["gemm2_weights"].dtype)
+        )
+        gemm2_scales_shuffled.append(
+            shuffle_matrix_sf_a(
+                quant_weights["gemm2_scales"][expert_idx]
+                .view(torch.uint8)
+                .reshape(hidden_size, -1),
+                epilogue_tile_m,
+            )
+            .contiguous()
+            .view(quant_weights["gemm2_scales"].dtype)
+        )
+
+    routing_replay_out = torch.full(
+        (num_tokens + 5, top_k), -1, device=device, dtype=torch.int16
+    )
+    trtllm_fp8_block_scale_moe(
+        routing_logits=routing_logits,
+        routing_bias=routing_bias,
+        hidden_states=quant_inputs["hidden_states"],
+        hidden_states_scale=quant_inputs["hidden_states_scale"],
+        gemm1_weights=torch.stack(gemm1_weights_shuffled),
+        gemm1_weights_scale=torch.stack(gemm1_scales_shuffled),
+        gemm2_weights=torch.stack(gemm2_weights_shuffled),
+        gemm2_weights_scale=torch.stack(gemm2_scales_shuffled),
+        num_experts=num_experts,
+        top_k=top_k,
+        n_group=n_group,
+        topk_group=topk_group,
+        intermediate_size=intermediate_size,
+        local_expert_offset=0,
+        local_num_experts=num_experts,
+        routed_scaling_factor=1.0,
+        routing_method_type=RoutingMethodType.DeepSeekV3.value,
+        use_shuffled_weight=True,
+        weight_layout=WeightLayout.MajorK.value,
+        enable_pdl=enable_pdl,
+        fp8_quantization_type=Fp8QuantizationType.MxFp8,
+        routing_replay_out=routing_replay_out,
+    )
+
+    active_replay = routing_replay_out[:num_tokens]
+    assert (active_replay >= 0).all() and (active_replay < num_experts).all()
+    assert all(row.unique().numel() == top_k for row in active_replay)
+    expected_experts = torch.topk(
+        torch.sigmoid(routing_logits) + routing_bias.float(), top_k, dim=-1
+    ).indices
+    torch.testing.assert_close(
+        active_replay.sort(dim=-1).values,
+        expected_experts.sort(dim=-1).values.to(torch.int16),
+    )
+    assert (routing_replay_out[num_tokens:] == -1).all()
