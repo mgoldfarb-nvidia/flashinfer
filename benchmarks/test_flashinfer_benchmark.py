@@ -1,5 +1,8 @@
 import flashinfer_benchmark
 import pytest
+import torch
+
+from flashinfer.cute_dsl import is_cute_dsl_available
 
 
 @pytest.mark.parametrize("batch_size", [16, 32])
@@ -49,6 +52,22 @@ def test_gemm_fp8_nt_groupwise(m, n, k, mma_sm):
         f"--routine gemm_fp8_nt_groupwise --m {m} --n {n} --k {k} --mma_sm {mma_sm} --no_cuda_graph --refcheck -vv".split()
     )
     flashinfer_benchmark.run_test(args)
+
+
+def test_mm_mxfp8_cute_dsl(tmp_path):
+    if torch.cuda.get_device_capability() not in [(10, 0), (10, 3)]:
+        pytest.skip("CuTe-DSL MXFP8 is supported only on SM100 and SM103")
+    if not is_cute_dsl_available():
+        pytest.skip("CuTe-DSL is not available")
+
+    output_path = tmp_path / "mm_mxfp8_cute_dsl.csv"
+    args = flashinfer_benchmark.parse_args(
+        f"--routine mm_mxfp8 --backends cute-dsl --m 1 --n 128 --k 256 "
+        f"--num_iters 1 --dry_run_iters 1 --no_cuda_graph --use_cuda_events "
+        f"--refcheck --output_path {output_path} -vv".split()
+    )
+    flashinfer_benchmark.run_test(args)
+    assert output_path.read_text().strip()
 
 
 @pytest.mark.parametrize("m", [1024, 4096])
