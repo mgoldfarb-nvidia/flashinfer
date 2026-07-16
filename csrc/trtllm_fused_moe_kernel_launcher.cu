@@ -103,6 +103,8 @@ inline void traceResolvedTileAndConfig(char const* op_name, Array<int64_t> const
                                        std::vector<int32_t> const& supported_tile_nums,
                                        int64_t num_tokens, int64_t top_k, int64_t local_num_experts,
                                        int64_t tile_N, int64_t config) {
+  if (!trtllm_moe_trace::should_trace_current_stage()) return;
+
   float const avg_tokens_per_expert =
       static_cast<float>(num_tokens * top_k) / std::max<int64_t>(local_num_experts, 1);
   std::ostringstream body;
@@ -561,7 +563,7 @@ class FusedMoeLauncher {
     this->moe_tactic = moe_tactic;
 
     auto workspace_sizes = moe_runner->getWorkspaceSizeInBytes(*args, moe_tactic);
-    {
+    if (trtllm_moe_trace::should_trace_current_stage()) {
       std::ostringstream body;
       body << "\"event\":\"flashinfer.trtllm_moe.resolved_config\""
            << ",\"event_kind\":\"resolved_config\""
@@ -661,7 +663,7 @@ class FusedMoeLauncher {
     prepare_moe(moe_tactic);
 
     cudaStream_t moe_stream = get_stream(hidden_states.device());
-    {
+    if (trtllm_moe_trace::should_trace_current_stage()) {
       std::ostringstream body;
       body << "\"event\":\"flashinfer.trtllm_moe.launch\""
            << ",\"event_kind\":\"launch\""
@@ -1457,7 +1459,7 @@ class Fp8BlockScaleLauncher : public FusedMoeLauncher {
     prepare_moe(moe_tactic);
 
     cudaStream_t moe_stream = get_stream(hidden_states.device());
-    {
+    if (trtllm_moe_trace::should_trace_current_stage()) {
       std::ostringstream body;
       body << "\"event\":\"flashinfer.trtllm_moe.launch\""
            << ",\"event_kind\":\"launch\""
@@ -2051,7 +2053,7 @@ class FP4BlockScaleLauncher : public FusedMoeLauncher {
     prepare_moe(moe_tactic);
 
     cudaStream_t moe_stream = get_stream(hidden_states.device());
-    {
+    if (trtllm_moe_trace::should_trace_current_stage()) {
       std::ostringstream body;
       body << "\"event\":\"flashinfer.trtllm_moe.launch\""
            << ",\"event_kind\":\"launch\""

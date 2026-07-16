@@ -1,5 +1,7 @@
 #pragma once
 
+#include <unistd.h>
+
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -9,16 +11,14 @@
 #include <unordered_set>
 #include <vector>
 
-#include <unistd.h>
-
 namespace flashinfer {
 namespace kernel_trace {
 
 inline bool is_truthy(char const* value) {
   if (value == nullptr) return false;
   std::string v(value);
-  return v == "1" || v == "true" || v == "TRUE" || v == "yes" || v == "YES" ||
-         v == "on" || v == "ON";
+  return v == "1" || v == "true" || v == "TRUE" || v == "yes" || v == "YES" || v == "on" ||
+         v == "ON";
 }
 
 inline std::string env_or(char const* name, char const* fallback) {
@@ -97,6 +97,38 @@ inline std::string trace_stage() {
   return value == nullptr ? std::string("unknown") : std::string(value);
 }
 
+inline std::vector<std::string> parse_stages(char const* value) {
+  std::vector<std::string> stages;
+  if (value == nullptr) return stages;
+
+  std::string const configured(value);
+  std::size_t start = 0;
+  while (start <= configured.size()) {
+    std::size_t const end = configured.find(',', start);
+    std::string stage = configured.substr(start, end - start);
+    std::size_t const first = stage.find_first_not_of(" \t\n\r\f\v");
+    if (first != std::string::npos) {
+      std::size_t const last = stage.find_last_not_of(" \t\n\r\f\v");
+      stages.push_back(stage.substr(first, last - first + 1));
+    }
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  return stages;
+}
+
+inline bool stage_enabled(std::string const& stage) {
+  static std::vector<std::string> const allowed_stages = parse_stages(
+      first_env("FLASHINFER_KERNEL_TRACE_STAGES", "FLASHINFER_TRTLLM_MOE_TRACE_STAGES"));
+  if (allowed_stages.empty()) return true;
+  for (std::string const& allowed_stage : allowed_stages) {
+    if (stage == allowed_stage) return true;
+  }
+  return false;
+}
+
+inline bool should_trace_current_stage() { return enabled() && stage_enabled(trace_stage()); }
+
 inline bool dedupe_enabled() { return trace_mode() == "shape_once"; }
 
 inline int64_t first_n_limit() {
@@ -167,11 +199,13 @@ inline std::string json_array(std::vector<T> const& values) {
 inline void append_body(std::string const& body, std::string const& dedupe_key = "") {
   if (!enabled()) return;
 
+  std::string const stage = trace_stage();
+  if (!stage_enabled(stage)) return;
+
   static std::mutex mutex;
   static std::unordered_set<std::string> seen;
   static int64_t event_count = 0;
   std::lock_guard<std::mutex> guard(mutex);
-  std::string const stage = trace_stage();
 
   if (dedupe_enabled() && !dedupe_key.empty()) {
     std::string const staged_dedupe_key = stage + ":" + dedupe_key;
@@ -194,13 +228,10 @@ inline void append_body(std::string const& body, std::string const& dedupe_key =
 
   out << "{\"schema_version\":2"
       << ",\"source\":\"flashinfer_cpp\""
-      << ",\"ts_ns\":" << now_ns()
-      << ",\"pid\":" << getpid()
-      << ",\"hostname\":" << quote(hostname())
-      << ",\"rank\":" << quote(rank())
-      << ",\"local_rank\":" << quote(local_rank())
-      << ",\"trace_stage\":" << quote(stage)
-      << "," << body << "}\n";
+      << ",\"ts_ns\":" << now_ns() << ",\"pid\":" << getpid()
+      << ",\"hostname\":" << quote(hostname()) << ",\"rank\":" << quote(rank())
+      << ",\"local_rank\":" << quote(local_rank()) << ",\"trace_stage\":" << quote(stage) << ","
+      << body << "}\n";
 }
 
 }  // namespace kernel_trace
