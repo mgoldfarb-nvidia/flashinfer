@@ -81,3 +81,18 @@ output = trtllm_fp8_block_scale_moe(..., routing_replay_out=replay)
 assert (replay != -1).any(), "Routing replay data is all sentinel values"
 assert (replay >= 0).all() and (replay < num_experts).all(), "Invalid expert IDs"
 ```
+
+## Selective Kernel Tracing
+
+Use a stage allowlist to capture the final tactic selected during vLLM CUDA graph capture without
+recording every autotuning candidate:
+
+```bash
+export FLASHINFER_KERNEL_TRACE=1
+export FLASHINFER_KERNEL_TRACE_FILE=/path/trace.rank%r.local%l.pid%p.jsonl
+export FLASHINFER_KERNEL_TRACE_STAGES=vllm_post_autotune_cudagraph_capture
+```
+
+`FLASHINFER_KERNEL_TRACE_STAGES` accepts exact, comma-separated stage names. Leave it unset or
+empty to capture every stage when debugging. The filter is applied before trace deduplication and
+event limits, so excluded autotuning events do not consume the selected stage's trace quota.

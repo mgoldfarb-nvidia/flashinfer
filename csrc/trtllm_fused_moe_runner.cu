@@ -17,7 +17,6 @@
 #include <iostream>
 #include <sstream>
 
-#include "trtllm_moe_trace.h"
 #include "flashinfer/exception.h"
 #include "flashinfer/trtllm/batched_gemm/KernelRunner.h"
 #include "flashinfer/trtllm/batched_gemm/trtllmGen_bmm_export/trtllm/gen/DtypeDecl.h"
@@ -27,6 +26,7 @@
 #include "flashinfer/trtllm/fused_moe/runner.h"
 #include "tensorrt_llm/common/envUtils.h"
 #include "tensorrt_llm/kernels/quantization.h"
+#include "trtllm_moe_trace.h"
 
 namespace tensorrt_llm {
 namespace kernels {
@@ -44,6 +44,8 @@ inline void traceMoeRoutingLaunch(int32_t tileTokensDim, int32_t numTokens, int3
                                   Routing::RoutingMethodType routingMethodType,
                                   bool useRoutingScalesOnInput, bool useDeepSeekFp8,
                                   bool normTopkProb, bool hasRoutingReplay) {
+  if (!flashinfer::trtllm_moe_trace::should_trace_current_stage()) return;
+
   std::ostringstream body;
   body << "\"event\":\"flashinfer.trtllm_moe.subkernel_launch\""
        << ",\"event_kind\":\"subkernel_launch\""
@@ -52,13 +54,9 @@ inline void traceMoeRoutingLaunch(int32_t tileTokensDim, int32_t numTokens, int3
        << ",\"backend\":\"trtllm\""
        << ",\"subkernel_kind\":\"routing\""
        << ",\"config_index\":-1"
-       << ",\"subkernel_config_index\":" << tileTokensDim
-       << ",\"tile_N\":" << tileTokensDim
-       << ",\"num_tokens\":" << numTokens
-       << ",\"num_experts\":" << numExperts
-       << ",\"top_k\":" << topK
-       << ",\"n_group\":" << nGroup
-       << ",\"topk_group\":" << topkGroup
+       << ",\"subkernel_config_index\":" << tileTokensDim << ",\"tile_N\":" << tileTokensDim
+       << ",\"num_tokens\":" << numTokens << ",\"num_experts\":" << numExperts
+       << ",\"top_k\":" << topK << ",\"n_group\":" << nGroup << ",\"topk_group\":" << topkGroup
        << ",\"local_expert_offset\":" << localExpertOffset
        << ",\"local_num_experts\":" << localNumExperts
        << ",\"routed_scaling_factor\":" << routedScalingFactor
@@ -66,23 +64,23 @@ inline void traceMoeRoutingLaunch(int32_t tileTokensDim, int32_t numTokens, int3
        << ",\"dtype_elt\":" << static_cast<int64_t>(dtypeElt)
        << ",\"dtype_bias\":" << static_cast<int64_t>(dtypeBias)
        << ",\"dtype_logits\":" << static_cast<int64_t>(dtypeLogits)
-       << ",\"use_routing_scales_on_input\":"
-       << (useRoutingScalesOnInput ? "true" : "false")
+       << ",\"use_routing_scales_on_input\":" << (useRoutingScalesOnInput ? "true" : "false")
        << ",\"use_deepseek_fp8\":" << (useDeepSeekFp8 ? "true" : "false")
        << ",\"norm_topk_prob\":" << (normTopkProb ? "true" : "false")
        << ",\"has_routing_replay\":" << (hasRoutingReplay ? "true" : "false");
 
   std::ostringstream key;
-  key << "subkernel_launch:routing:" << tileTokensDim << ":" << numTokens << ":"
-      << numExperts << ":" << topK << ":" << nGroup << ":" << topkGroup << ":"
-      << localExpertOffset << ":" << localNumExperts << ":"
-      << static_cast<int64_t>(routingMethodType);
+  key << "subkernel_launch:routing:" << tileTokensDim << ":" << numTokens << ":" << numExperts
+      << ":" << topK << ":" << nGroup << ":" << topkGroup << ":" << localExpertOffset << ":"
+      << localNumExperts << ":" << static_cast<int64_t>(routingMethodType);
   flashinfer::trtllm_moe_trace::append_body(body.str(), key.str());
 }
 
 inline void traceMoeSubkernelLaunch(char const* subkernel_kind, MoE::MoERunnerArgs const& args,
                                     int device, int64_t configIndex, int64_t subkernelConfigIndex,
                                     bool enable_pdl, char const* detail = nullptr) {
+  if (!flashinfer::trtllm_moe_trace::should_trace_current_stage()) return;
+
   std::ostringstream body;
   body << "\"event\":\"flashinfer.trtllm_moe.subkernel_launch\""
        << ",\"event_kind\":\"subkernel_launch\""
@@ -92,24 +90,18 @@ inline void traceMoeSubkernelLaunch(char const* subkernel_kind, MoE::MoERunnerAr
        << ",\"subkernel_kind\":" << flashinfer::trtllm_moe_trace::quote(subkernel_kind)
        << ",\"config_index\":" << configIndex
        << ",\"subkernel_config_index\":" << subkernelConfigIndex
-       << ",\"enable_pdl\":" << (enable_pdl ? "true" : "false")
-       << ",\"device\":" << device
-       << ",\"num_tokens\":" << args.num_tokens
-       << ",\"hidden_size\":" << args.hidden_size
+       << ",\"enable_pdl\":" << (enable_pdl ? "true" : "false") << ",\"device\":" << device
+       << ",\"num_tokens\":" << args.num_tokens << ",\"hidden_size\":" << args.hidden_size
        << ",\"hidden_size_output\":"
-       << (args.hidden_size_output.has_value() ? args.hidden_size_output.value()
-                                               : args.hidden_size)
+       << (args.hidden_size_output.has_value() ? args.hidden_size_output.value() : args.hidden_size)
        << ",\"intermediate_size\":" << args.intermediate_size
        << ",\"num_experts\":" << args.num_experts
        << ",\"local_expert_offset\":" << args.local_expert_offset
-       << ",\"local_num_experts\":" << args.local_num_experts
-       << ",\"top_k\":" << args.top_k
-       << ",\"n_group\":" << args.n_group
-       << ",\"topk_group\":" << args.topk_group
+       << ",\"local_num_experts\":" << args.local_num_experts << ",\"top_k\":" << args.top_k
+       << ",\"n_group\":" << args.n_group << ",\"topk_group\":" << args.topk_group
        << ",\"do_finalize\":" << (args.do_finalize ? "true" : "false")
        << ",\"use_deepseek_fp8\":" << (args.mUseDeepSeekFp8 ? "true" : "false")
-       << ",\"use_routing_scales_on_input\":"
-       << (args.mUseRoutingScalesOnInput ? "true" : "false")
+       << ",\"use_routing_scales_on_input\":" << (args.mUseRoutingScalesOnInput ? "true" : "false")
        << ",\"dtype_elt\":" << static_cast<int64_t>(args.mDtypeElt)
        << ",\"dtype_out\":" << static_cast<int64_t>(args.mDtypeOut)
        << ",\"dtype_expert_weights\":" << static_cast<int64_t>(args.mDtypeExpW)
@@ -119,9 +111,9 @@ inline void traceMoeSubkernelLaunch(char const* subkernel_kind, MoE::MoERunnerAr
   }
 
   std::ostringstream key;
-  key << "subkernel_launch:" << subkernel_kind << ":" << configIndex << ":"
-      << subkernelConfigIndex << ":" << args.num_tokens << ":" << args.hidden_size << ":"
-      << args.intermediate_size << ":" << args.top_k << ":" << args.local_num_experts;
+  key << "subkernel_launch:" << subkernel_kind << ":" << configIndex << ":" << subkernelConfigIndex
+      << ":" << args.num_tokens << ":" << args.hidden_size << ":" << args.intermediate_size << ":"
+      << args.top_k << ":" << args.local_num_experts;
   flashinfer::trtllm_moe_trace::append_body(body.str(), key.str());
 }
 
@@ -869,30 +861,25 @@ void Runner::run(MoERunnerArgs const& args, MoEWorkspace const& workspace, int d
   void* hidden_states_scale_linear{args.hidden_states_scale};
 
   auto const& config = mPassingConfigs[configIndex];
-  {
+  if (flashinfer::trtllm_moe_trace::should_trace_current_stage()) {
     std::ostringstream body;
     body << "\"event\":\"flashinfer.trtllm_moe.kernel_config\""
          << ",\"event_kind\":\"kernel_config\""
          << ",\"op_family\":\"moe\""
          << ",\"op_name\":\"trtllm_moe\""
          << ",\"backend\":\"trtllm\""
-         << ",\"config_index\":" << configIndex
-         << ",\"gemm1_config_index\":" << config.gemm1Config
+         << ",\"config_index\":" << configIndex << ",\"gemm1_config_index\":" << config.gemm1Config
          << ",\"gemm2_config_index\":" << config.gemm2Config
-         << ",\"enable_pdl\":" << (enable_pdl ? "true" : "false")
-         << ",\"device\":" << device
-         << ",\"num_tokens\":" << args.num_tokens
-         << ",\"hidden_size\":" << args.hidden_size
+         << ",\"enable_pdl\":" << (enable_pdl ? "true" : "false") << ",\"device\":" << device
+         << ",\"num_tokens\":" << args.num_tokens << ",\"hidden_size\":" << args.hidden_size
          << ",\"hidden_size_output\":"
          << (args.hidden_size_output.has_value() ? args.hidden_size_output.value()
                                                  : args.hidden_size)
          << ",\"intermediate_size\":" << args.intermediate_size
          << ",\"num_experts\":" << args.num_experts
          << ",\"local_expert_offset\":" << args.local_expert_offset
-         << ",\"local_num_experts\":" << args.local_num_experts
-         << ",\"top_k\":" << args.top_k
-         << ",\"n_group\":" << args.n_group
-         << ",\"topk_group\":" << args.topk_group
+         << ",\"local_num_experts\":" << args.local_num_experts << ",\"top_k\":" << args.top_k
+         << ",\"n_group\":" << args.n_group << ",\"topk_group\":" << args.topk_group
          << ",\"routed_scaling_factor\":" << args.routed_scaling_factor
          << ",\"do_finalize\":" << (args.do_finalize ? "true" : "false")
          << ",\"use_deepseek_fp8\":" << (args.mUseDeepSeekFp8 ? "true" : "false")
@@ -904,9 +891,9 @@ void Runner::run(MoERunnerArgs const& args, MoEWorkspace const& workspace, int d
          << ",\"activation_type\":" << static_cast<int64_t>(args.activation_type);
 
     std::ostringstream key;
-    key << "kernel_config:" << configIndex << ":" << config.gemm1Config << ":"
-        << config.gemm2Config << ":" << args.num_tokens << ":" << args.hidden_size << ":"
-        << args.intermediate_size << ":" << args.top_k << ":" << args.local_num_experts;
+    key << "kernel_config:" << configIndex << ":" << config.gemm1Config << ":" << config.gemm2Config
+        << ":" << args.num_tokens << ":" << args.hidden_size << ":" << args.intermediate_size << ":"
+        << args.top_k << ":" << args.local_num_experts;
     flashinfer::trtllm_moe_trace::append_body(body.str(), key.str());
   }
 

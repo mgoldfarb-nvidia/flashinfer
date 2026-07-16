@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ _TRACE_FILE_ENV = "FLASHINFER_KERNEL_TRACE_FILE"
 _TRACE_MODE_ENV = "FLASHINFER_KERNEL_TRACE_MODE"
 _TRACE_FIRST_N_ENV = "FLASHINFER_KERNEL_TRACE_FIRST_N"
 _TRACE_STAGE_ENV = "FLASHINFER_KERNEL_TRACE_STAGE"
+_TRACE_STAGES_ENV = "FLASHINFER_KERNEL_TRACE_STAGES"
 _TRACE_PROFILES_ENV = "FLASHINFER_KERNEL_TRACE_PROFILES"
 _TRACE_VERBOSE_ENV = "FLASHINFER_KERNEL_TRACE_VERBOSE"
 
@@ -24,6 +26,7 @@ _LEGACY_TRACE_FILE_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_FILE"
 _LEGACY_TRACE_MODE_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_MODE"
 _LEGACY_TRACE_FIRST_N_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_FIRST_N"
 _LEGACY_TRACE_STAGE_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_STAGE"
+_LEGACY_TRACE_STAGES_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_STAGES"
 _LEGACY_TRACE_PROFILES_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_PROFILES"
 _LEGACY_TRACE_VERBOSE_ENV = "FLASHINFER_TRTLLM_MOE_TRACE_VERBOSE"
 
@@ -59,14 +62,16 @@ def enabled() -> bool:
 
 
 def profile_events_enabled() -> bool:
-    return _truthy(os.getenv(_TRACE_PROFILES_ENV)) or _truthy(
-        os.getenv(_LEGACY_TRACE_PROFILES_ENV)
+    return _stage_enabled(current_stage()) and (
+        _truthy(os.getenv(_TRACE_PROFILES_ENV))
+        or _truthy(os.getenv(_LEGACY_TRACE_PROFILES_ENV))
     )
 
 
 def verbose_enabled() -> bool:
-    return _truthy(os.getenv(_TRACE_VERBOSE_ENV)) or _truthy(
-        os.getenv(_LEGACY_TRACE_VERBOSE_ENV)
+    return _stage_enabled(current_stage()) and (
+        _truthy(os.getenv(_TRACE_VERBOSE_ENV))
+        or _truthy(os.getenv(_LEGACY_TRACE_VERBOSE_ENV))
     )
 
 
@@ -75,6 +80,19 @@ def current_stage() -> str:
     if stack:
         return stack[-1]
     return _env_value(_TRACE_STAGE_ENV, _LEGACY_TRACE_STAGE_ENV, "unknown") or "unknown"
+
+
+@cache
+def _parse_stages(value: str) -> frozenset[str]:
+    return frozenset(stage.strip() for stage in value.split(",") if stage.strip())
+
+
+def _stage_enabled(stage: str) -> bool:
+    configured = _env_value(_TRACE_STAGES_ENV, _LEGACY_TRACE_STAGES_ENV)
+    if configured is None:
+        return True
+    allowed_stages = _parse_stages(configured)
+    return not allowed_stages or stage in allowed_stages
 
 
 @contextmanager
@@ -178,7 +196,8 @@ def _json_default(value: Any) -> str:
 
 def _trace_mode() -> str:
     return (
-        _env_value(_TRACE_MODE_ENV, _LEGACY_TRACE_MODE_ENV, "shape_once") or "shape_once"
+        _env_value(_TRACE_MODE_ENV, _LEGACY_TRACE_MODE_ENV, "shape_once")
+        or "shape_once"
     ).lower()
 
 
@@ -214,7 +233,9 @@ def _infer_op_family(event: str, op_name: str | None) -> str | None:
         return "comm"
     if any(term in search for term in ("quant", "fp4", "fp8", "mxfp8")):
         return "quant"
-    if any(term in search for term in ("decode", "prefill", "attention", "fmha", "xqa")):
+    if any(
+        term in search for term in ("decode", "prefill", "attention", "fmha", "xqa")
+    ):
         return "attention"
     if "gemm" in search or "mm" in search:
         return "gemm"
@@ -261,6 +282,8 @@ def trace_event(
         return
 
     stage = current_stage()
+    if not _stage_enabled(stage):
+        return
     context = current_context()
 
     if _dedupe_enabled() and dedupe_key is not None:
