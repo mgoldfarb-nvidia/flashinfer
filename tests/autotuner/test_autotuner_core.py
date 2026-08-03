@@ -48,6 +48,51 @@ class DummyRunner(TunableRunner):
         return inputs[0]
 
 
+class CacheExtraRunner(DummyRunner):
+    def __init__(self, cache_key_extras):
+        super().__init__(valid_tactics=(0,))
+        self.cache_key_extras = cache_key_extras
+
+    def get_cache_key_extras(self, inputs):
+        return self.cache_key_extras
+
+
+def test_candidate_trace_includes_runner_cache_key_extras(monkeypatch):
+    tuner = reset_autotuner()
+    runners = [CacheExtraRunner(("left", True)), CacheExtraRunner(("right", False))]
+    events = []
+
+    monkeypatch.setattr(
+        "flashinfer.autotuner._moe_trace_event",
+        lambda event, payload, **kwargs: events.append((event, payload, kwargs)),
+    )
+    monkeypatch.setattr(
+        AutoTuner,
+        "_profile_single_kernel",
+        lambda self, runner, inputs, tactic, tuning_config, **kwargs: 1.0,
+    )
+
+    tuner.is_tuning_mode = True
+    try:
+        tuner.choose_one(
+            "test_op", runners, TuningConfig(), [torch.empty((1,), dtype=torch.float32)]
+        )
+    finally:
+        tuner.is_tuning_mode = False
+
+    candidates = [
+        event for event in events if event[0] == "flashinfer.autotune.candidates"
+    ]
+    assert [event[1]["cache_key_extras"] for event in candidates] == [
+        ["left", True],
+        ["right", False],
+    ]
+    assert [event[2]["dedupe_key"][-2] for event in candidates] == [
+        ["left", True],
+        ["right", False],
+    ]
+
+
 def test_find_nearest_profile_passthrough_without_specs():
     """No dynamic/constraint specs should keep shape values unchanged."""
     shapes = (torch.Size([3, 5]), torch.Size([7, 11, 13]))

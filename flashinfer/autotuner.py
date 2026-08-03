@@ -1323,6 +1323,7 @@ class AutoTuner:
                         skipped_count = 0
                         for r_id, r in enumerate(runners):
                             # TODO: use FakeTensor here.
+                            cache_key_extras = r.get_cache_key_extras(tensors)
                             valid_tactics = r.get_valid_tactics(tensors, p)
                             valid_tactics_payload = (
                                 [_tactic_to_json(t) for t in valid_tactics]
@@ -1338,6 +1339,9 @@ class AutoTuner:
                                     "runner_hash": hash(r),
                                     "profile_shapes": p.get_opt_shapes(),
                                     "input_shapes": _moe_trace_tensor_shapes(tensors),
+                                    "cache_key_extras": _tactic_to_json(
+                                        cache_key_extras
+                                    ),
                                     "valid_tactic_count": len(valid_tactics),
                                     "valid_tactics": valid_tactics_payload,
                                 },
@@ -1345,6 +1349,7 @@ class AutoTuner:
                                     custom_op,
                                     r_id,
                                     p.get_opt_shapes(),
+                                    _tactic_to_json(cache_key_extras),
                                     len(valid_tactics),
                                 ),
                             )
@@ -1397,7 +1402,7 @@ class AutoTuner:
                                             r,
                                             p.get_opt_shapes(),
                                             tuning_config,
-                                            r.get_cache_key_extras(tensors),
+                                            cache_key_extras,
                                         )
                                     )
 
