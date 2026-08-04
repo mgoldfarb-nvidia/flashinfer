@@ -11,7 +11,6 @@ from setuptools import build_meta as _orig
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from build_utils import get_git_version
-from flashinfer_cubin._build_cache import copy_tree_contents, prune_tree
 
 # Skip version check when building flashinfer-cubin package
 os.environ["FLASHINFER_DISABLE_VERSION_CHECK"] = "1"
@@ -19,6 +18,8 @@ os.environ["FLASHINFER_DISABLE_VERSION_CHECK"] = "1"
 
 def _download_cubins():
     """Download cubins to the source directory before building."""
+    from flashinfer_cubin._build_cache import copy_tree_contents, prune_tree
+
     # Create cubins directory in the source tree
     cubin_dir = Path(__file__).parent / "flashinfer_cubin" / "cubins"
     cubin_dir.mkdir(parents=True, exist_ok=True)
