@@ -443,6 +443,61 @@ def test_block_fp8_deepseek_v3_from_logits_matches_prerouted(variant):
     _assert_fp8_close(actual, expected)
 
 
+def test_mxfp8_nemotron_routing_replay_uses_global_expert_ids():
+    num_experts = 512
+    top_k = 22
+    local_expert_offset = 448
+    local_num_experts = num_experts - local_expert_offset
+    pack, weights, config, _ = _make_block_fp8_case(
+        QuantVariant.MxFp8,
+        expert_offset=local_expert_offset,
+        local_experts=local_num_experts,
+    )
+    generator = torch.Generator(device="cuda").manual_seed(20260804)
+    logits = torch.randn(
+        TOKENS,
+        num_experts,
+        device="cuda",
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    bias = torch.randn(
+        num_experts,
+        device="cuda",
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    expected_ids, _ = _deepseek_v3_route(
+        logits,
+        bias,
+        top_k=top_k,
+        n_group=1,
+        topk_group=1,
+        scale=1.0,
+    )
+    assert torch.any(expected_ids >= local_num_experts)
+
+    config = dataclasses.replace(
+        config,
+        routing=RoutingConfig(
+            num_experts=num_experts,
+            top_k=top_k,
+            method=RoutingMethodType.DeepSeekV3,
+            n_group=1,
+            topk_group=1,
+            routed_scaling_factor=1.0,
+        ),
+    )
+    from_logits = MoEActivationPack(
+        hidden_states_q=pack.hidden_states_q,
+        hidden_states_scale=pack.hidden_states_scale,
+        routing_input_mode=RoutingInputMode.FromLogits,
+        routing_logits=logits,
+        routing_bias=bias,
+    )
+    _run_from_logits_with_replay(MoELayer(config), from_logits, weights, expected_ids)
+
+
 @pytest.mark.parametrize("variant", [QuantVariant.DeepSeekFp8, QuantVariant.MxFp8])
 def test_block_fp8_nonzero_expert_offset(variant):
     offset = 8

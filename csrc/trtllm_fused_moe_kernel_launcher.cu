@@ -51,8 +51,6 @@ enum class RoutingInputMode {
 };
 
 // Validate routing_replay_out tensor properties.
-// NOTE: dim0 >= num_tokens is intentionally NOT checked — with CUDA graphs the buffer
-// is pre-allocated at maximum batch size and reused across steps with varying num_tokens.
 static void validate_routing_replay_out(TensorView const& replay, TensorView const& hidden_states,
                                         int64_t top_k) {
   TVM_FFI_ICHECK(replay.device().device_type == kDLCUDA)
@@ -60,6 +58,8 @@ static void validate_routing_replay_out(TensorView const& replay, TensorView con
   TVM_FFI_ICHECK(replay.device().device_id == hidden_states.device().device_id)
       << "routing_replay_out must be on the same device as hidden_states";
   TVM_FFI_ICHECK(replay.ndim() == 2) << "routing_replay_out must be 2D [num_tokens, top_k]";
+  TVM_FFI_ICHECK_GE(replay.size(0), hidden_states.size(0))
+      << "routing_replay_out dim0 must cover every active token";
   TVM_FFI_ICHECK(replay.size(1) == top_k) << "routing_replay_out dim1 must equal top_k";
   TVM_FFI_ICHECK((replay.dtype() == DLDataType{kDLInt, 16, 1}))
       << "routing_replay_out must be int16 dtype";

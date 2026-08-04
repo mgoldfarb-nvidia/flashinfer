@@ -3228,6 +3228,7 @@ def _validate_bf16_gemm1_activation_params(
 def _validate_routing_replay_out(
     routing_replay_out: Optional[torch.Tensor],
     top_k: int,
+    num_tokens: int,
     num_fused_shared_experts: int = 0,
 ) -> None:
     """Validate routing_replay_out tensor properties before passing to C++ kernels."""
@@ -3245,6 +3246,11 @@ def _validate_routing_replay_out(
     if routing_replay_out.ndim != 2:
         raise ValueError(
             f"routing_replay_out must be 2D [num_tokens, top_k], got {routing_replay_out.ndim}D"
+        )
+    if routing_replay_out.shape[0] < num_tokens:
+        raise ValueError(
+            "routing_replay_out dim0 must cover every active token: "
+            f"expected at least {num_tokens}, got {routing_replay_out.shape[0]}"
         )
     if routing_replay_out.shape[1] != top_k:
         raise ValueError(
@@ -3427,7 +3433,7 @@ def trtllm_bf16_moe(
         scalar return; will become ``[output]`` in v0.8.0).  Otherwise returns
         ``[gemm2_output, expert_weights, expanded_idx_to_permuted_idx]``.
     """
-    _validate_routing_replay_out(routing_replay_out, top_k)
+    _validate_routing_replay_out(routing_replay_out, top_k, hidden_states.shape[0])
     _validate_bf16_gemm1_activation_params(
         activation_type,
         gemm1_alpha,
@@ -3630,7 +3636,7 @@ def trtllm_bf16_routed_moe(
         ``False``      ``Tensor``          ``[gemm2_output, expert_weights, expanded_idx_to_permuted_idx, gemm1_activation_output]``
         =============  ==================  =========================================================================
     """
-    _validate_routing_replay_out(routing_replay_out, top_k)
+    _validate_routing_replay_out(routing_replay_out, top_k, hidden_states.shape[0])
     _validate_bf16_gemm1_activation_params(
         activation_type,
         gemm1_alpha,
@@ -3799,7 +3805,7 @@ def trtllm_fp8_per_tensor_scale_moe(
         Final MoE output when ``do_finalize`` is ``True``, otherwise
         ``[gemm2_output, expert_weights, expanded_idx_to_permuted_idx]``.
     """
-    _validate_routing_replay_out(routing_replay_out, top_k)
+    _validate_routing_replay_out(routing_replay_out, top_k, hidden_states.shape[0])
     result = get_trtllm_moe_sm100_module().trtllm_fp8_per_tensor_scale_moe(
         routing_logits,
         routing_bias,
@@ -3935,7 +3941,7 @@ def trtllm_fp8_per_tensor_scale_routed_moe(
         Final MoE output when ``do_finalize`` is ``True``, otherwise
         ``[gemm2_output, expert_weights, expanded_idx_to_permuted_idx]``.
     """
-    _validate_routing_replay_out(routing_replay_out, top_k)
+    _validate_routing_replay_out(routing_replay_out, top_k, hidden_states.shape[0])
     result = get_trtllm_moe_sm100_module().trtllm_fp8_per_tensor_scale_routed_moe(
         topk_ids,
         routing_bias,
@@ -4154,7 +4160,9 @@ def trtllm_fp8_block_scale_moe(
             "Fused shared experts (num_fused_shared_experts > 0) are only supported "
             f"with DeepSeekV3 routing; got routing_method_type={routing_method_type}."
         )
-    _validate_routing_replay_out(routing_replay_out, top_k, nfse)
+    _validate_routing_replay_out(
+        routing_replay_out, top_k, hidden_states.shape[0], nfse
+    )
     _validate_fp8_block_scale_gemm1_activation_params(
         fp8_quantization_type,
         activation_type,
@@ -4617,7 +4625,9 @@ def trtllm_fp4_block_scale_moe(
             "Fused shared experts (num_fused_shared_experts > 0) are only supported "
             f"with DeepSeekV3 routing; got routing_method_type={routing_method_type}."
         )
-    _validate_routing_replay_out(routing_replay_out, top_k, nsfe)
+    _validate_routing_replay_out(
+        routing_replay_out, top_k, hidden_states.shape[0], nsfe
+    )
     return get_trtllm_moe_sm100_module().trtllm_fp4_block_scale_moe(
         RoutingInputMode.FromLogits,
         routing_logits,
@@ -5012,7 +5022,7 @@ def trtllm_mxint4_block_scale_moe(
         ``[output]`` when ``do_finalize`` is ``True``, otherwise
         ``[gemm2_output, expert_weights, expanded_idx_to_permuted_idx]``.
     """
-    _validate_routing_replay_out(routing_replay_out, top_k)
+    _validate_routing_replay_out(routing_replay_out, top_k, hidden_states.shape[0])
     return get_trtllm_moe_sm100_module().trtllm_mxint4_block_scale_moe(
         routing_logits,
         routing_bias,
