@@ -225,16 +225,28 @@ def get_checksums(subdirs):
         uri = safe_urljoin(
             FLASHINFER_CUBINS_REPOSITORY, safe_urljoin(subdir, "checksums.txt")
         )
-        checksum_path = FLASHINFER_CUBIN_DIR / safe_urljoin(subdir, "checksums.txt")
-        if not download_file(uri, checksum_path) and not checksum_path.is_file():
-            # Without this the next open() fails with a bare FileNotFoundError on
-            # the local cache path, which hides the real cause: the artifact pin
-            # is unreachable (typo'd/unpublished pin, or network/mirror failure).
-            raise RuntimeError(
-                f"Failed to fetch the checksum manifest for artifact pin '{subdir}' "
-                f"from {uri}. Check that the pin exists in "
-                f"{FLASHINFER_CUBINS_REPOSITORY} and is reachable."
-            )
+        checksum_name = safe_urljoin(subdir, "checksums.txt")
+        checksum_path = FLASHINFER_CUBIN_DIR / checksum_name
+        checksum_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_sha256 = CheckSumHash.map_checksums.get(checksum_name)
+        cached = (
+            expected_sha256 is not None
+            and checksum_path.is_file()
+            and verify_cubin(str(checksum_path), expected_sha256)
+        )
+        if cached:
+            logger.info(f"Reusing cached artifact: {checksum_path}")
+        else:
+            downloaded = download_file(uri, checksum_path)
+            valid_download = downloaded and checksum_path.is_file()
+            if valid_download and expected_sha256 is not None:
+                valid_download = verify_cubin(str(checksum_path), expected_sha256)
+            if not valid_download:
+                raise RuntimeError(
+                    f"Failed to fetch a valid checksum manifest for artifact pin "
+                    f"'{subdir}' from {uri}. Check that the pin exists in "
+                    f"{FLASHINFER_CUBINS_REPOSITORY} and is reachable."
+                )
         with open(checksum_path, "r") as f:
             for line in f:
                 sha256, filename = line.strip().split()
@@ -331,13 +343,13 @@ def get_subdir_file_list() -> Generator[tuple[str, str], None, None]:
             yield (full_path, checksums[full_path])
 
 
-def download_artifacts() -> None:
+def download_artifacts() -> tuple[tuple[str, str], ...]:
     from tqdm.contrib.logging import tqdm_logging_redirect
 
     # use a shared session to make use of HTTP keep-alive and reuse of
     # HTTPS connections.
     session = requests.Session()
-    cubin_files = list[tuple[str, str]](get_subdir_file_list())
+    cubin_files = tuple(get_subdir_file_list())
     num_threads = int(os.environ.get("FLASHINFER_CUBIN_DOWNLOAD_THREADS", "4"))
     with tqdm_logging_redirect(
         total=len(cubin_files), desc="Downloading cubins"
@@ -348,18 +360,24 @@ def download_artifacts() -> None:
 
         with ThreadPoolExecutor(num_threads) as pool:
             futures = []
-            for name, _ in cubin_files:
+            results = []
+            for name, checksum in cubin_files:
                 source = safe_urljoin(FLASHINFER_CUBINS_REPOSITORY, name)
                 local_path = FLASHINFER_CUBIN_DIR / name
                 # Ensure parent directory exists
                 local_path.parent.mkdir(parents=True, exist_ok=True)
+                if local_path.is_file() and verify_cubin(str(local_path), checksum):
+                    logger.info(f"Reusing cached artifact: {local_path}")
+                    results.append(True)
+                    pbar.update(1)
+                    continue
                 fut = pool.submit(
                     download_file, source, str(local_path), session=session
                 )
                 fut.add_done_callback(update_pbar_cb)
                 futures.append(fut)
 
-            results = [fut.result() for fut in as_completed(futures)]
+            results.extend(fut.result() for fut in as_completed(futures))
 
     all_success = all(results)
     if not all_success:
@@ -370,6 +388,8 @@ def download_artifacts() -> None:
         local_path = FLASHINFER_CUBIN_DIR / name
         if not verify_cubin(str(local_path), checksum):
             raise RuntimeError("Failed to download cubins: checksum mismatch")
+
+    return cubin_files
 
 
 def get_artifacts_status() -> tuple[tuple[str, bool], ...]:

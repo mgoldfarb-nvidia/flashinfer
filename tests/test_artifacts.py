@@ -1,8 +1,13 @@
 from flashinfer.artifacts import (
     ArtifactPath,
+    download_artifacts,
     get_available_cubin_files,
     get_subdir_file_list,
 )
+
+import hashlib
+import importlib.util
+from pathlib import Path
 
 import pytest
 import responses
@@ -320,20 +325,27 @@ def test_get_checksums_unreachable_pin_raises(monkeypatch, tmp_path):
     assert artifact_paths.DEEPGEMM_RUBIN in str(excinfo.value)
 
 
-def test_get_checksums_falls_back_to_cached_manifest(monkeypatch, tmp_path):
-    """A failed refresh must not invalidate an already-cached manifest.
-
-    Offline / FLASHINFER_NO_DOWNLOAD setups rely on the on-disk copy.
-    """
+def test_get_checksums_reuses_valid_cached_manifest(monkeypatch, tmp_path):
+    """Offline builds can use a checksum-validated on-disk manifest."""
     from flashinfer import artifacts
 
     cubin_dir = tmp_path / "cubins"
     monkeypatch.setattr(artifacts, "FLASHINFER_CUBIN_DIR", cubin_dir)
-    monkeypatch.setattr(artifacts, "download_file", lambda *args, **kwargs: False)
-
     cached = cubin_dir / safe_urljoin(artifact_paths.DEEPGEMM_RUBIN, "checksums.txt")
     cached.parent.mkdir(parents=True)
-    cached.write_text("abc123 kernel.fp8_m_grouped_gemm.007d9ebdca7e.cubin\n")
+    manifest = b"abc123 kernel.fp8_m_grouped_gemm.007d9ebdca7e.cubin\n"
+    cached.write_bytes(manifest)
+    checksum_name = safe_urljoin(artifact_paths.DEEPGEMM_RUBIN, "checksums.txt")
+    monkeypatch.setitem(
+        artifacts.CheckSumHash.map_checksums,
+        checksum_name,
+        hashlib.sha256(manifest).hexdigest(),
+    )
+
+    def fail_download(*args, **kwargs):
+        pytest.fail("valid cached manifest should not be downloaded")
+
+    monkeypatch.setattr(artifacts, "download_file", fail_download)
 
     checksums = artifacts.get_checksums([artifact_paths.DEEPGEMM_RUBIN])
     assert checksums == {
@@ -342,6 +354,88 @@ def test_get_checksums_falls_back_to_cached_manifest(monkeypatch, tmp_path):
             "kernel.fp8_m_grouped_gemm.007d9ebdca7e.cubin",
         ): "abc123"
     }
+
+
+def test_get_checksums_rejects_corrupt_manifest_after_failed_refresh(
+    monkeypatch, tmp_path
+):
+    from flashinfer import artifacts
+
+    subdir = "pin/"
+    checksum_name = safe_urljoin(subdir, "checksums.txt")
+    manifest_path = tmp_path / checksum_name
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_bytes(b"corrupt")
+
+    monkeypatch.setattr(artifacts, "FLASHINFER_CUBIN_DIR", tmp_path)
+    monkeypatch.setitem(
+        artifacts.CheckSumHash.map_checksums,
+        checksum_name,
+        hashlib.sha256(b"expected manifest").hexdigest(),
+    )
+    monkeypatch.setattr(artifacts, "download_file", lambda *args, **kwargs: False)
+
+    with pytest.raises(RuntimeError, match="valid checksum manifest"):
+        artifacts.get_checksums([subdir])
+
+
+def test_download_artifacts_reuses_valid_files(monkeypatch, tmp_path):
+    from flashinfer import artifacts
+
+    cached_bytes = b"cached artifact"
+    downloaded_bytes = b"downloaded artifact"
+    artifact_files = (
+        ("pin/cached.cubin", hashlib.sha256(cached_bytes).hexdigest()),
+        ("pin/downloaded.cubin", hashlib.sha256(downloaded_bytes).hexdigest()),
+    )
+    cached_path = tmp_path / artifact_files[0][0]
+    cached_path.parent.mkdir(parents=True)
+    cached_path.write_bytes(cached_bytes)
+    download_calls = []
+
+    def fake_download(source, destination, **kwargs):
+        download_calls.append((source, destination))
+        Path(destination).write_bytes(downloaded_bytes)
+        return True
+
+    monkeypatch.setattr(artifacts, "FLASHINFER_CUBIN_DIR", tmp_path)
+    monkeypatch.setattr(artifacts, "get_subdir_file_list", lambda: artifact_files)
+    monkeypatch.setattr(artifacts, "download_file", fake_download)
+
+    assert download_artifacts() == artifact_files
+    assert [Path(destination).name for _, destination in download_calls] == [
+        "downloaded.cubin"
+    ]
+
+
+def test_cubin_build_cache_prunes_stale_files(tmp_path):
+    helper_path = (
+        Path(__file__).parents[1]
+        / "flashinfer-cubin"
+        / "flashinfer_cubin"
+        / "_build_cache.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "flashinfer_cubin_build_cache", helper_path
+    )
+    assert spec is not None and spec.loader is not None
+    build_cache = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build_cache)
+
+    cache_dir = tmp_path / "cache"
+    package_dir = tmp_path / "package"
+    (cache_dir / "pin").mkdir(parents=True)
+    (cache_dir / "pin" / "current.cubin").write_bytes(b"current")
+    (cache_dir / "old" / "stale.cubin").parent.mkdir(parents=True)
+    (cache_dir / "old" / "stale.cubin").write_bytes(b"stale")
+    (cache_dir / "ignored.lock").write_bytes(b"lock")
+
+    build_cache.copy_tree_contents(cache_dir, package_dir)
+    build_cache.prune_tree(package_dir, {Path("pin/current.cubin")})
+
+    assert (package_dir / "pin" / "current.cubin").read_bytes() == b"current"
+    assert not (package_dir / "old").exists()
+    assert not (package_dir / "ignored.lock").exists()
 
 
 @responses.activate
@@ -460,6 +554,21 @@ f9a0b1c2d3e4 kernel.fp8_m_grouped_gemm.0457375eb02f.cubin
         status=200,
     )
 
+    for subdir, manifest in (
+        (artifact_paths.TRTLLM_GEN_FMHA, checksums_fmha),
+        (artifact_paths.TRTLLM_GEN_GEMM, checksums_gemm),
+        (artifact_paths.TRTLLM_GEN_BMM, checksums_bmm),
+        (artifact_paths.TRTLLM_GEN_BMM_RUBIN, checksums_bmm_rubin),
+        (artifact_paths.TRTLLM_GEN_GEMM_RUBIN, checksums_gemm_rubin),
+        (artifact_paths.DEEPGEMM, checksums_deepgemm),
+        (artifact_paths.DEEPGEMM_RUBIN, checksums_deepgemm_rubin),
+    ):
+        monkeypatch.setitem(
+            artifacts.CheckSumHash.map_checksums,
+            safe_urljoin(subdir, "checksums.txt"),
+            hashlib.sha256(manifest.encode()).hexdigest(),
+        )
+
     # Mock DSL_FMHA checksums + directory index for the host cpu_arch.
     # Pin to x86_64 so the test is deterministic regardless of the runner arch.
     monkeypatch.setattr(artifacts, "_get_host_cpu_arch", lambda: "x86_64")
@@ -469,6 +578,11 @@ f9a0b1c2d3e4 kernel.fp8_m_grouped_gemm.0457375eb02f.cubin
     empty_dir_index = '<html><body><pre><a href="../">../</a></pre></body></html>'
     for sm_arch in artifact_paths.DSL_FMHA_ARCHS:
         subdir = safe_urljoin(artifact_paths.DSL_FMHA, f"x86_64/{sm_arch}/")
+        monkeypatch.setitem(
+            artifacts.CheckSumHash.map_checksums,
+            safe_urljoin(subdir, "checksums.txt"),
+            hashlib.sha256(checksums_dsl_fmha.encode()).hexdigest(),
+        )
         responses.add(
             responses.GET,
             safe_urljoin(test_cubin_repository, safe_urljoin(subdir, "checksums.txt")),

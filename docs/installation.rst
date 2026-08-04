@@ -105,6 +105,13 @@ You can follow the steps below to install FlashInfer from source code:
        python -m build --no-isolation --wheel
        python -m pip install dist/*.whl
 
+   Repeated builds can reuse checksum-validated downloads from persistent storage:
+
+   .. code-block:: bash
+
+       export FLASHINFER_CUBIN_CACHE_DIR="${SCRATCH}/flashinfer-cubins"
+       python -m build --no-isolation --wheel
+
    Build ``flashinfer-jit-cache`` (customize ``FLASHINFER_CUDA_ARCH_LIST`` for your target GPUs):
 
    .. code-block:: bash

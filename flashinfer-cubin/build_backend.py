@@ -11,6 +11,7 @@ from setuptools import build_meta as _orig
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from build_utils import get_git_version
+from flashinfer_cubin._build_cache import copy_tree_contents, prune_tree
 
 # Skip version check when building flashinfer-cubin package
 os.environ["FLASHINFER_DISABLE_VERSION_CHECK"] = "1"
@@ -18,26 +19,47 @@ os.environ["FLASHINFER_DISABLE_VERSION_CHECK"] = "1"
 
 def _download_cubins():
     """Download cubins to the source directory before building."""
-    from flashinfer.artifacts import download_artifacts
-
     # Create cubins directory in the source tree
     cubin_dir = Path(__file__).parent / "flashinfer_cubin" / "cubins"
     cubin_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir_value = os.environ.get("FLASHINFER_CUBIN_CACHE_DIR")
+    cache_dir = Path(cache_dir_value) if cache_dir_value else None
 
     # Set environment variable to download to our package directory
     original_cubin_dir = os.environ.get("FLASHINFER_CUBIN_DIR")
     os.environ["FLASHINFER_CUBIN_DIR"] = str(cubin_dir)
+    original_module_dirs = []
 
     try:
+        if cache_dir is not None:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Restoring cached cubins from {cache_dir}...")
+            copy_tree_contents(cache_dir, cubin_dir)
+
+        from flashinfer import artifacts
+        from flashinfer.jit import cubin_loader
+        from flashinfer.jit import env as jit_env
+
+        for module in (jit_env, cubin_loader, artifacts):
+            original_module_dirs.append((module, module.FLASHINFER_CUBIN_DIR))
+            module.FLASHINFER_CUBIN_DIR = cubin_dir
+
         print(f"Downloading cubins to {cubin_dir}...")
-        download_artifacts()
+        expected_artifacts = artifacts.download_artifacts()
+        prune_tree(cubin_dir, {Path(name) for name, _ in expected_artifacts})
         print(f"Successfully downloaded cubins to {cubin_dir}")
 
         # Count the downloaded files
         cubin_files = list(cubin_dir.rglob("*.cubin"))
         print(f"Downloaded {len(cubin_files)} cubin files")
 
+        if cache_dir is not None:
+            print(f"Updating cubin cache at {cache_dir}...")
+            copy_tree_contents(cubin_dir, cache_dir)
+
     finally:
+        for module, original_dir in original_module_dirs:
+            module.FLASHINFER_CUBIN_DIR = original_dir
         # Restore original environment variable
         if original_cubin_dir:
             os.environ["FLASHINFER_CUBIN_DIR"] = original_cubin_dir
