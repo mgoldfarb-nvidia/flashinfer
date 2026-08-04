@@ -37,6 +37,7 @@ from flashinfer.autotuner.initializers import (
     TensorInitializer,
     autotuner_initializer_rand_scaled,
 )
+from flashinfer.autotuner import trace as autotune_trace
 
 # This version should be updated whenever the nvfp4_cutlass backend is changed,
 # such as when new kernels or configs are added. In such cases, the tuning configs
@@ -1319,6 +1320,21 @@ class AutoTuner:
                 runner_keys.append((r_id, cache_key))
                 if cache_key in self.profiling_cache:
                     tactic, stored_profile = self.profiling_cache[cache_key]
+                    autotune_trace.cache_lookup(
+                        custom_op,
+                        r_id,
+                        r,
+                        input_shapes,
+                        cache_key,
+                        cache_source="memory",
+                        cache_hit=True,
+                        tactic=tactic,
+                        stored_profile_shapes=(
+                            stored_profile.get_opt_shapes()
+                            if stored_profile is not None
+                            else None
+                        ),
+                    )
                     return True, r_id, tactic, stored_profile
 
             # 2. User-loaded configs (from load_configs or autotune(cache=...))
@@ -1335,6 +1351,16 @@ class AutoTuner:
                             f"[Autotuner]: Config cache hit for {custom_op} "
                             f"(runner={runner_name}, source=config file)"
                         )
+                    autotune_trace.cache_lookup(
+                        custom_op,
+                        r_id,
+                        runners[r_id],
+                        input_shapes,
+                        cache_key,
+                        cache_source="config_file",
+                        cache_hit=True,
+                        tactic=tactic,
+                    )
                     return True, r_id, tactic, None
 
             # 3. Bundled package configs (legacy .py files)
@@ -1345,9 +1371,29 @@ class AutoTuner:
                 for r_id, cache_key in runner_keys:
                     is_hit, _, file_tactic, _ = load_from_file(cache_key.file_key)
                     if is_hit:
+                        autotune_trace.cache_lookup(
+                            custom_op,
+                            r_id,
+                            runners[r_id],
+                            input_shapes,
+                            cache_key,
+                            cache_source="bundled_file",
+                            cache_hit=True,
+                            tactic=file_tactic,
+                        )
                         return True, r_id, file_tactic, None
 
             # 4. Fallback
+            autotune_trace.cache_lookup(
+                custom_op,
+                0,
+                runners[0],
+                input_shapes,
+                None,
+                cache_source="none",
+                cache_hit=False,
+                tactic=-1,
+            )
             return False, 0, -1, None
 
     def _apply_tuning_overrides(self, tuning_config: TuningConfig) -> TuningConfig:
@@ -1463,7 +1509,18 @@ class AutoTuner:
             )
             if not runners:
                 raise ValueError(f"No runners provided for op '{custom_op}'")
-            return runners[0], -1
+            runner = runners[0]
+            autotune_trace.selected(
+                custom_op,
+                0,
+                runner,
+                -1,
+                self._get_input_sizes(inputs),
+                cache_hit=False,
+                stored_profile_shapes=None,
+                selection_reason="skip_ops",
+            )
+            return runner, -1
 
         with self._lock:
             # Apply tuning bucket / rounding overrides from autotune() context.
@@ -1474,10 +1531,23 @@ class AutoTuner:
 
             # Early return if it's not tuning, use cache found one or fallback one
             if not self.is_tuning_mode:
-                is_cache_hit, runner_id, tactic, _ = self.search_cache(
+                is_cache_hit, runner_id, tactic, stored_profile = self.search_cache(
                     custom_op, runners, input_shapes, tuning_config, inputs=inputs
                 )
                 runner = runners[runner_id]
+                autotune_trace.selected(
+                    custom_op,
+                    runner_id,
+                    runner,
+                    tactic,
+                    input_shapes,
+                    cache_hit=is_cache_hit,
+                    stored_profile_shapes=(
+                        stored_profile.get_opt_shapes()
+                        if stored_profile is not None
+                        else None
+                    ),
+                )
                 # TODO: check the stored runner and tactic can implement this shape here
                 # Should not directly try (runner, tactic) here, or it will hurt a lot of inference perf.
 
@@ -1608,9 +1678,19 @@ class AutoTuner:
                         skipped_count = 0
                         for r_id, r in enumerate(runners):
                             # TODO: use FakeTensor here.
+                            cache_key_extras = r.get_cache_key_extras(tensors)
                             valid_tactics = r.get_valid_tactics(tensors, p)
                             valid_tactics = self._blocklist.filter(
                                 custom_op, r, valid_tactics
+                            )
+                            autotune_trace.candidates(
+                                custom_op,
+                                r_id,
+                                r,
+                                p.get_opt_shapes(),
+                                self._get_input_sizes(tensors),
+                                cache_key_extras,
+                                valid_tactics,
                             )
                             runner_arg_names = runner_arg_names_map[r]
                             if (
@@ -1622,6 +1702,15 @@ class AutoTuner:
                                 try:
                                     time_measured = self._profile_single_kernel(
                                         r, tensors, tac, tuning_config, **kwargs
+                                    )
+                                    autotune_trace.profile(
+                                        custom_op,
+                                        r,
+                                        tac,
+                                        self._get_input_sizes(tensors),
+                                        time_measured,
+                                        warmup=self.warmup,
+                                        repeat=self.repeat,
                                     )
                                 except torch.cuda.OutOfMemoryError:
                                     # Distributed autotuning: the per-tactic
@@ -1684,7 +1773,7 @@ class AutoTuner:
                                             r,
                                             p.get_opt_shapes(),
                                             tuning_config,
-                                            r.get_cache_key_extras(tensors),
+                                            cache_key_extras,
                                         )
                                     )
 
@@ -1719,6 +1808,16 @@ class AutoTuner:
                             )
                             logger.debug(
                                 f"[Autotuner]: profiling chosen runner: {runners[runner_id]} {tactic} for {cache_key}"
+                            )
+                            autotune_trace.chosen(
+                                custom_op,
+                                runner_id,
+                                runners[runner_id],
+                                tactic,
+                                min_time,
+                                p.get_opt_shapes(),
+                                self._get_input_sizes(tensors),
+                                cache_key,
                             )
 
                 except torch.cuda.OutOfMemoryError:

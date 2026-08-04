@@ -262,6 +262,41 @@ JSON arrays and restored to tuples on load.
 The file is human-readable but not portable. Config ordering is not guaranteed to be
 stable across FlashInfer, CUDA, cuDNN, or cuBLAS versions.
 
+Tracing Autotuner Decisions
+---------------------------
+
+FlashInfer can write the candidates, measurements, cache result, and selected
+tactic for every autotuned operation to JSON Lines. Set the variables before
+starting Python; tracing is disabled by default and its settings are read when
+the autotuner is imported.
+
+.. code-block:: bash
+
+    export FLASHINFER_KERNEL_TRACE=1
+    export FLASHINFER_KERNEL_TRACE_FILE=/tmp/flashinfer.rank%r.pid%p.jsonl
+    export FLASHINFER_KERNEL_TRACE_MODE=all
+    export FLASHINFER_KERNEL_TRACE_PROFILES=1
+    export FLASHINFER_KERNEL_TRACE_VERBOSE=1
+
+``FLASHINFER_KERNEL_TRACE_PROFILES`` includes every measured candidate time.
+``FLASHINFER_KERNEL_TRACE_VERBOSE`` includes the full candidate tactic values;
+otherwise candidate counts are still recorded. ``FLASHINFER_KERNEL_TRACE_MODE``
+accepts ``shape_once`` (the default), ``all``, or ``first_n``. For ``first_n``,
+set ``FLASHINFER_KERNEL_TRACE_FIRST_N`` to the per-event limit. The trace path
+supports ``%p`` (process ID), ``%r`` (rank), ``%l`` (local rank), and ``%h``
+(hostname), which should be used to avoid multi-process writers sharing a file.
+A user-specified literal shared path is protected only within one process and is
+not safe for concurrent multi-process writers.
+
+The emitted events are ``candidates``, ``profile``, ``chosen``, ``cache_lookup``,
+and ``selected``, under the ``flashinfer.autotune`` namespace. Candidate timings
+are synthetic autotuner measurements; they are not a replacement for end-to-end
+application profiling.
+
+For performance correlation, collect this trace in a separate evidence run that
+reproduces the timed workload. Candidate profiling and verbose trace I/O can
+perturb the silicon measurement, so keep the primary timing run uninstrumented.
+
 API Reference
 -------------
 
